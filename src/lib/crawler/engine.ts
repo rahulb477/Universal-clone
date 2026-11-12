@@ -6,6 +6,7 @@ import { AssetManager, type AssetRecord } from "./assets";
 import { decodeHtml, extractFromHtml, rewriteCss, rewriteHtml } from "./parser";
 import { fetchWithRetry, HostThrottle, HttpError, sleep, type HttpResult } from "./http";
 import { Renderer } from "./renderer";
+import type { AuthProfile } from "./auth";
 import { Robots, parseSitemap } from "./robots";
 import { writeReports, type DiscoveredRow, type PageRow, type ReportData } from "./report";
 import { assertPublicUrl, safeJoin, SsrfError } from "./security";
@@ -19,7 +20,11 @@ export interface CrawlerInternal {
   /** Operator-only switch (never reachable from the API): allows crawling private addresses, for tests/intranet use. */
   allowPrivateNetworks?: boolean;
   resume?: boolean;
+  /** One isolated authenticated profile per archive/job. Never persisted in crawl options. */
+  authProfile?: AuthProfile;
 }
+
+class AuthSessionExpiredError extends Error {}
 
 interface QueueItem {
   url: string;
@@ -82,6 +87,7 @@ export class Crawler extends EventEmitter {
   stopReason?: string;
 
   private allowPrivate: boolean;
+  private authProfile?: AuthProfile;
   private workDir: string;
   private rawDir: string;
   private siteDir: string;
@@ -146,13 +152,14 @@ export class Crawler extends EventEmitter {
     this.startUrl = startUrl.trim();
     this.opts = sanitizeOptions(options);
     this.allowPrivate = !!internal.allowPrivateNetworks;
+    this.authProfile = internal.authProfile;
     this.workDir = internal.workDir;
     this.rawDir = path.join(this.workDir, "raw");
     this.siteDir = path.join(this.workDir, "site");
     this.reportDir = path.join(this.workDir, "report");
     this.zipPath = path.join(this.workDir, "site.zip");
     this.resume = !!internal.resume;
-    this.effectiveMode = this.opts.renderMode;
+    this.effectiveMode = this.authProfile ? "js" : this.opts.renderMode;
     this.sem = new Semaphore(Math.max(2, this.opts.concurrency * 3));
     this.pageNorm = {
       keepQuery: this.opts.crawlQueryParams,
@@ -174,12 +181,23 @@ export class Crawler extends EventEmitter {
     this.log("INFO", "Paused");
   }
 
-  resumeCrawl() {
+  async resumeCrawl() {
     if (this.status !== "paused") return;
+    if (this.authProfile && this.renderer) {
+      this.log("INFO", "Reauthenticating the isolated profile before resuming");
+      await this.renderer.clearAuthContext();
+      try {
+        await this.renderer.authenticate(this.authProfile, this.opts.requestTimeoutMs);
+      } catch {
+        this.log("WARN", "Reauthentication failed; crawl remains paused. Check credentials and the authenticated-state selector.");
+        throw new Error("Reauthentication failed; the crawl remains paused.");
+      }
+    }
+    this.stopReason = undefined;
     this.paused = false;
     this.segStart = Date.now();
     this.setStatus("running");
-    this.log("INFO", "Resumed");
+    this.log("INFO", this.authProfile ? "Reauthenticated session verified; crawl resumed" : "Resumed");
     this.releaseGate();
   }
 
@@ -229,6 +247,14 @@ export class Crawler extends EventEmitter {
   }
 
   // ---------- internals ----------
+
+  private wipeAuthProfile() {
+    if (this.authProfile) {
+      this.authProfile.username = "";
+      this.authProfile.password = "";
+      this.authProfile = undefined;
+    }
+  }
 
   private activeMs() {
     return this.activeAccum + (this.status === "running" ? Date.now() - this.segStart : 0);
@@ -446,15 +472,21 @@ export class Crawler extends EventEmitter {
         this.log("FOUND", sn);
       }
 
-      if (this.opts.renderMode !== "fast" || this.opts.visualCompare) {
+      if (this.authProfile || this.opts.renderMode !== "fast" || this.opts.visualCompare) {
         this.renderer = await Renderer.create(this.allowPrivate);
         if (!this.renderer) {
+          if (this.authProfile) throw new Error(`Authenticated crawling requires Chromium, but it could not be launched (${Renderer.lastError}).`);
           if (this.opts.renderMode !== "fast") {
             this.effectiveMode = "fast";
             this.log("WARN", `Chromium unavailable (${Renderer.lastError}); falling back to fast HTML mode`);
             this.unsupported.notes.push(`JavaScript rendering was requested but Chromium could not be launched (${Renderer.lastError}). Pages were fetched as static HTML.`);
           }
           if (this.opts.visualCompare) this.visualNote = `Visual comparison skipped: Chromium unavailable (${Renderer.lastError}).`;
+        }
+        if (this.renderer && this.authProfile) {
+          this.log("INFO", "Starting authorized login flow");
+          await this.renderer.authenticate(this.authProfile, this.opts.requestTimeoutMs);
+          this.log("INFO", "Login state verified; authenticated crawl starting");
         }
       }
 
@@ -467,7 +499,9 @@ export class Crawler extends EventEmitter {
       const err = e as Error;
       this.error = err instanceof SsrfError ? `Blocked by security policy: ${err.message}` : err.message;
       this.log("FAILED", this.error);
+      await this.renderer?.clearAuthContext();
       await this.renderer?.close();
+      this.wipeAuthProfile();
       if (this.status === "running" || this.status === "paused") {
         this.activeAccum = this.activeMs();
         this.status = "failed";
@@ -548,7 +582,16 @@ export class Crawler extends EventEmitter {
       try {
         await this.processPage(item);
       } catch (e) {
-        this.pageFailed(item, e as Error);
+        if (e instanceof AuthSessionExpiredError) {
+          const d = this.discovered.get(item.key);
+          if (d) d.status = "queued";
+          this.queue.unshift(item);
+          this.paused = true;
+          this.stopReason = "Authenticated session expired; reauthenticate to resume this profile.";
+          await this.saveState();
+          this.log("WARN", this.stopReason);
+          this.setStatus("paused");
+        } else this.pageFailed(item, e as Error);
       } finally {
         this.inflight--;
         this.inflightItems.delete(item);
@@ -595,9 +638,25 @@ export class Crawler extends EventEmitter {
 
     const remaining = this.remainingBytes();
     if (remaining <= 0) throw new Error("total size quota reached");
-    const res = await this.fetchUrl(url, Math.min(this.opts.maxFileSize, remaining), (next) => {
-      if (depth > 0 && !this.scope.isSameSite(next)) throw new Error("redirect leaves the authorised domain scope");
-    });
+    let authenticatedRender: Awaited<ReturnType<Renderer["render"]>> | undefined;
+    let res: HttpResult & { attempts: number };
+    if (this.authProfile) {
+      if (!this.renderer) throw new Error("Authenticated browser session is unavailable.");
+      const loginOrigin = new URL(this.authProfile.loginUrl).origin;
+      authenticatedRender = await this.renderer.render(url, { mode: "js", timeoutMs: this.opts.requestTimeoutMs, signal: this.ctrl.signal, validateNavigation: (target) => {
+        try { const next = new URL(target); return this.scope.isSameSite(next) || next.origin === loginOrigin; } catch { return false; }
+      } });
+      const final = new URL(authenticatedRender.finalUrl);
+      const loginUrl = new URL(this.authProfile.loginUrl);
+      if (final.pathname === loginUrl.pathname && final.origin === loginUrl.origin) throw new AuthSessionExpiredError("The session redirected back to the login page.");
+      if (authenticatedRender.status === 401 || authenticatedRender.status === 403 || (authenticatedRender.status >= 300 && authenticatedRender.status < 400)) throw new AuthSessionExpiredError("The authenticated page returned an access-denied or redirect response.");
+      if (!this.scope.isSameSite(final)) throw new Error("redirect leaves the authorised domain scope");
+      res = { url: authenticatedRender.finalUrl, status: authenticatedRender.status, headers: { "content-type": "text/html; charset=utf-8" }, body: Buffer.from(authenticatedRender.html), redirects: [], contentType: "text/html; charset=utf-8", attempts: 1 };
+    } else {
+      res = await this.fetchUrl(url, Math.min(this.opts.maxFileSize, remaining), (next) => {
+        if (depth > 0 && !this.scope.isSameSite(next)) throw new Error("redirect leaves the authorised domain scope");
+      });
+    }
     let finalUrlObj = new URL(res.url);
     if (depth === 0 && !this.scope.isSameSite(finalUrlObj)) {
       this.scope.rebase(finalUrlObj);
@@ -608,6 +667,7 @@ export class Crawler extends EventEmitter {
       err.attempts = res.attempts;
       return this.pageFailed(item, err, res.status);
     }
+    if (this.authProfile && res.body.byteLength > Math.min(this.opts.maxFileSize, this.remainingBytes())) throw new Error("authenticated rendered page exceeded the configured page-size limit");
     const ct = res.contentType;
     const looksHtml = /html|xhtml/.test(ct) || (!ct && /^\s*<(!doctype|html)/i.test(res.body.subarray(0, 200).toString("latin1")));
     if (!looksHtml) {
@@ -620,10 +680,14 @@ export class Crawler extends EventEmitter {
     }
 
     let html = decodeHtml(res.body, ct);
-    let renderedWith = "fast";
+    let renderedWith = this.authProfile ? "authenticated-js" : "fast";
     let networkAssets: string[] = [];
     let routes: string[] = [];
-    if (this.renderer && this.effectiveMode !== "fast") {
+    if (authenticatedRender) {
+      networkAssets = authenticatedRender.networkAssets;
+      routes = authenticatedRender.routes;
+      authenticatedRender.apiCalls.forEach((a) => this.unsupported.apiCalls.add(a));
+    } else if (this.renderer && this.effectiveMode !== "fast") {
       try {
         const r = await this.renderer.render(res.url, { mode: this.effectiveMode, timeoutMs: this.opts.requestTimeoutMs, signal: this.ctrl.signal });
         html = r.html;
@@ -772,7 +836,9 @@ export class Crawler extends EventEmitter {
     const startKey = urlKey(this.startNormalized);
     const startTarget = this.pages.get(this.resolveAlias(startKey));
     if (this.pages.size === 0) {
+      await this.renderer?.clearAuthContext();
       await this.renderer?.close();
+      this.wipeAuthProfile();
       const first = this.failures.find((f) => f.kind === "page");
       this.error = first ? `Could not download the start page: ${first.error}` : (this.skipped[0]?.reason ? `Start page was skipped: ${this.skipped[0].reason}` : "No pages could be downloaded");
       await this.writeAllReports("failed");
@@ -820,7 +886,9 @@ export class Crawler extends EventEmitter {
         this.visualNote = `Visual comparison failed: ${(e as Error).message}`;
       }
     }
+    await this.renderer?.clearAuthContext();
     await this.renderer?.close();
+    this.wipeAuthProfile();
 
     await this.writeAllReports(wasCancelled ? "cancelled" : "completed");
     this.log("INFO", "Creating ZIP archive…");

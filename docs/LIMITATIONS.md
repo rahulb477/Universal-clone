@@ -4,9 +4,10 @@
 its only measured results so far are on a tiny local fixture page (0.000 % difference — which says nothing about complex sites).
 
 ## Cannot work offline / not archived
-* Forms (search, login, comments, checkout), server-side logic, live APIs (`fetch`/XHR endpoints are *listed* in the report, not
-  archived), WebSockets, payments. Non-GET browser requests are blocked on purpose.
-* Anything behind authentication, paywalls, CAPTCHAs or IP/geo restrictions — never bypassed.
+* Forms (search, comments, checkout), server-side logic, live APIs (`fetch`/XHR endpoints are *listed* in the report, not
+  archived), WebSockets, payments. Non-GET browser requests are blocked except for explicitly configured login-phase form POSTs.
+* Paywalls, CAPTCHAs, MFA and IP/geo restrictions are never bypassed. See [authenticated crawling scope](AUTHENTICATED-CRAWLING.md):
+  automated form login is opt-in, but manual browser/MFA login and authenticated assets/XHR remain unsupported.
 * Hash-routed SPAs (`/#/page`): fragments are dropped, so those routes are not discovered.
 * Service workers/PWA offline logic (blocked during rendering).
 

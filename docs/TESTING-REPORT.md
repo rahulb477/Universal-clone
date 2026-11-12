@@ -88,3 +88,40 @@ Several first-run failures were wrong test fixtures/expectations (e.g. a fixture
 * HTTPS/SSL error paths (classification code exists; no TLS fixture was built).
 * Windows/macOS file-system behaviour of the generated paths (names are restricted to portable characters but were only run on Linux).
 * Rendering of real fonts/frameworks (React/Vue/Angular/Next production sites) — only synthetic SPA/JS fixtures.
+
+## Authenticated-crawling increment (2026-11-12)
+
+### Automated results in this sandbox
+
+| Command | Result |
+|---|---|
+| `npm run typecheck` | Pass |
+| `npm run lint` | Pass with no ESLint warnings |
+| `DATABASE_URL=postgres://localhost/postgres npm run build` | Pass. Next route collection requires `DATABASE_URL`; this placeholder satisfies build-time configuration only and does not establish a live PostgreSQL service. |
+| `npx vitest run tests/unit tests/integration tests/e2e/browser.test.ts` | Pass: 130 passed, 13 skipped across 7 files. Existing public crawling integration tests pass. |
+| Full `npx vitest run` before build | Not a full-suite pass: the production API test requires a prior build. After building, the API suite was not run because this environment has no confirmed PostgreSQL service. |
+
+The 13 skipped tests are browser-dependent: the existing nine Chromium tests and four new authenticated-browser scenarios. This sandbox has no Playwright Chromium headless-shell executable. They were skipped by the test guard; **no authenticated browser login, protected-page download, session isolation, MFA, or session-expiration recovery was executed here**.
+
+### Added coverage
+
+- `tests/unit/auth.test.ts` (4 passed): AES-256-GCM envelope encryption and tamper rejection, safe profile projection, unsafe URL / missing verification-selector rejection, constant-time operator-token check.
+- `tests/integration/authenticated-crawl.test.ts` (4 skipped without Chromium): test-owned website with a real form POST and cookie session, dashboard and nested private orders/settings routes; assertions cover verified login, separate profile archives, session isolation, invalid credentials, expiry/re-authentication, and password redaction.
+- `tests/fixtures/auth-site.ts`: local controlled website fixture; used only by tests.
+
+### Acceptance coverage and outstanding gaps
+
+Code added for isolated per-profile **separate archives**, verified standard form login, encrypted profile storage, authenticated browser GET rendering, bounded login-origin form POSTs, session-expiration pause/re-authentication on resume, and bearer checks on auth-sensitive endpoints. Browser-backed behavior is not claimed as runtime-verified because Chromium was unavailable.
+
+Still incomplete relative to the request: manual/headed browser login and human MFA completion, combined-discovery mode, browser-cookie-authenticated asset downloads, authenticated XHR/API crawling, and application-level authorization on the existing non-auth crawl/history/control/download APIs. The application must remain behind a trusted access-control proxy. The implementation therefore does **not** meet the full acceptance bar yet.
+
+### Reproduction
+
+```sh
+npm run typecheck
+npm run lint
+DATABASE_URL=postgres://localhost/postgres npm run build
+npx vitest run tests/unit tests/integration tests/e2e/browser.test.ts
+```
+
+To execute authenticated browser tests instead of skip, install the exact Chromium headless-shell version required by the pinned Playwright, ensure OS libraries are installed, and rerun. For production API end-to-end tests, provide a live PostgreSQL service/schema and run the build before the full suite.

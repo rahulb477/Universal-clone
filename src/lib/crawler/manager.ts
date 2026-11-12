@@ -7,9 +7,10 @@ import { crawlJobs, type CrawlJobRow } from "@/db/schema";
 import { Crawler } from "./engine";
 import { assertPublicUrl, SsrfError } from "./security";
 import { sanitizeOptions, type CrawlStats, type LogEvent } from "./types";
+import { decryptAuthProfiles, encryptAuthProfiles, type AuthProfile } from "./auth";
 
 export const DATA_DIR = process.env.CRAWL_DATA_DIR || path.join(/* turbopackIgnore: true */ process.cwd(), ".crawl-data");
-const MAX_CONCURRENT_JOBS = Number(process.env.CRAWLER_MAX_CONCURRENT_JOBS) || 2;
+const MAX_CONCURRENT_JOBS = Number(process.env.CRAWLER_MAX_CONCURRENT_JOBS) || 5;
 const STORAGE_QUOTA = Number(process.env.CRAWLER_STORAGE_QUOTA_BYTES) || 5 * 1024 * 1024 * 1024;
 const RETENTION_HOURS = Number(process.env.CRAWL_RETENTION_HOURS) || 24;
 const STARTS_PER_MINUTE = Number(process.env.CRAWLER_STARTS_PER_MINUTE) || 5;
@@ -86,10 +87,21 @@ class JobManager {
     return n;
   }
 
-  async start(rawUrl: unknown, options: unknown, ip: string): Promise<string> {
+  reserveAuthBatchStart(ip: string) {
+    this.rateLimit(ip);
+  }
+
+  async assertBatchCapacity(count: number) {
+    await this.ready;
+    if (count < 1 || count > MAX_CONCURRENT_JOBS || this.runningCount() + count > MAX_CONCURRENT_JOBS) {
+      throw new ApiError(429, `This batch needs ${count} crawl slots; only ${Math.max(0, MAX_CONCURRENT_JOBS - this.runningCount())} are currently available.`);
+    }
+  }
+
+  async start(rawUrl: unknown, options: unknown, ip: string, authProfile?: AuthProfile): Promise<string> {
     await this.ready;
     if (typeof rawUrl !== "string" || !rawUrl.trim() || rawUrl.length > 2048) throw new ApiError(400, "Please enter a website URL.");
-    this.rateLimit(ip);
+    if (!authProfile) this.rateLimit(ip);
     if (this.runningCount() >= MAX_CONCURRENT_JOBS) throw new ApiError(429, `The server is already running ${MAX_CONCURRENT_JOBS} crawls. Wait for one to finish.`);
     const used = await db.select({ total: sql<number>`coalesce(sum(${crawlJobs.zipBytes}), 0)::float8` }).from(crawlJobs);
     if ((used[0]?.total ?? 0) >= STORAGE_QUOTA) throw new ApiError(507, "Server storage quota reached. Delete old downloads first.");
@@ -103,10 +115,16 @@ class JobManager {
       if (e instanceof SsrfError) throw new ApiError(400, `This address is not allowed: ${e.message}`);
       throw e;
     }
-    const opts = sanitizeOptions(options);
+    const opts = sanitizeOptions(authProfile ? { ...(options && typeof options === "object" ? options as Record<string, unknown> : {}), concurrency: 2 } : options);
     const id = crypto.randomBytes(8).toString("hex");
     await db.insert(crawlJobs).values({ id, url, status: "running", options: opts });
-    const crawler = new Crawler(url, opts, { workDir: jobDir(id), allowPrivateNetworks: allowPrivate });
+    const dir = jobDir(id);
+    await fs.promises.mkdir(dir, { recursive: true, mode: 0o700 });
+    if (authProfile) {
+      const envelope = encryptAuthProfiles([authProfile]);
+      await fs.promises.writeFile(path.join(dir, "auth.enc"), envelope, { mode: 0o600, flag: "wx" });
+    }
+    const crawler = new Crawler(url, opts, { workDir: dir, allowPrivateNetworks: allowPrivate, authProfile });
     this.attach(id, crawler);
     return id;
   }
@@ -115,7 +133,7 @@ class JobManager {
     await this.ready;
     const live = this.live.get(id);
     if (live) {
-      live.crawler.resumeCrawl();
+      await live.crawler.resumeCrawl();
       return;
     }
     const row = await this.getRow(id);
@@ -124,10 +142,14 @@ class JobManager {
     if (!fs.existsSync(path.join(jobDir(id), "state.json"))) throw new ApiError(409, "No saved state is available for this crawl.");
     if (this.runningCount() >= MAX_CONCURRENT_JOBS) throw new ApiError(429, "Too many crawls are running.");
     await db.update(crawlJobs).set({ status: "running", error: null }).where(eq(crawlJobs.id, id));
+    let authProfile: AuthProfile | undefined;
+    const authFile = path.join(jobDir(id), "auth.enc");
+    if (fs.existsSync(authFile)) authProfile = decryptAuthProfiles(await fs.promises.readFile(authFile, "utf8"))[0];
     const crawler = new Crawler(row.url, sanitizeOptions(row.options), {
       workDir: jobDir(id),
       resume: true,
       allowPrivateNetworks: process.env.CRAWLER_ALLOW_PRIVATE_NETWORKS === "1",
+      authProfile,
     });
     this.attach(id, crawler);
   }
@@ -166,13 +188,22 @@ class JobManager {
             finishedAt: new Date(),
           })
           .where(eq(crawlJobs.id, id));
+        if (result.status === "completed" || result.status === "cancelled" || result.status === "failed") await fs.promises.rm(path.join(jobDir(id), "auth.enc"), { force: true });
         fan({ type: "done", data: { status: result.status, error: result.error, zipBytes } });
       })
       .catch(async (e: Error) => {
-        await db.update(crawlJobs).set({ status: "failed", error: e.message, finishedAt: new Date() }).where(eq(crawlJobs.id, id));
-        fan({ type: "done", data: { status: "failed", error: e.message } });
+        await fs.promises.rm(path.join(jobDir(id), "auth.enc"), { force: true });
+        await db.update(crawlJobs).set({ status: "failed", error: "Crawl failed.", finishedAt: new Date() }).where(eq(crawlJobs.id, id));
+        fan({ type: "done", data: { status: "failed", error: "Crawl failed." } });
       })
       .finally(() => setTimeout(() => this.live.delete(id), 60000).unref?.());
+  }
+
+  async clearCredentials(id: string) {
+    const dir = jobDir(id);
+    const live = this.live.get(id);
+    if (live && (live.crawler.status === "running" || live.crawler.status === "paused")) live.crawler.cancel();
+    await fs.promises.rm(path.join(dir, "auth.enc"), { force: true });
   }
 
   control(id: string, action: string) {

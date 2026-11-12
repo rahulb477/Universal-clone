@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { AuthenticationStatus } from "@/lib/crawler/types";
 
 type Stats = {
   pagesDiscovered: number;
@@ -24,6 +25,21 @@ type Stats = {
   stopReason?: string;
 };
 type Log = { t: number; tag: string; message: string };
+type LoginProfile = {
+  id: string;
+  name: string;
+  loginUrl: string;
+  username: string;
+  password: string;
+  loginButtonSelector: string;
+  usernameSelector: string;
+  passwordSelector: string;
+  authenticatedSelector: string;
+  method: "form";
+  editing: boolean;
+  status: AuthenticationStatus;
+  jobId?: string;
+};
 type Job = {
   id: string;
   url: string;
@@ -96,6 +112,10 @@ const STATUS_STYLE: Record<string, string> = {
 
 export default function Downloader() {
   const [url, setUrl] = useState("");
+  const [authEnabled, setAuthEnabled] = useState(false);
+  const [authToken, setAuthToken] = useState("");
+  const [profiles, setProfiles] = useState<LoginProfile[]>([]);
+  const [testingProfile, setTestingProfile] = useState<string | null>(null);
   const [confirm, setConfirm] = useState(false);
   const [showAdv, setShowAdv] = useState(false);
   const [s, setS] = useState(DEFAULTS);
@@ -119,16 +139,15 @@ export default function Downloader() {
   }, []);
 
   useEffect(() => {
-    void loadHistory();
-    const t = setInterval(loadHistory, 5000);
-    return () => clearInterval(t);
+    const initial = window.setTimeout(() => void loadHistory(), 0);
+    const t = window.setInterval(loadHistory, 5000);
+    return () => { window.clearTimeout(initial); window.clearInterval(t); };
   }, [loadHistory]);
 
   // Live updates via Server-Sent Events
   useEffect(() => {
     if (!activeId) return;
-    setLogs([]);
-    setStats(null);
+    const reset = window.setTimeout(() => { setLogs([]); setStats(null); }, 0);
     const es = new EventSource(`/api/crawl/${activeId}/events`);
     es.addEventListener("snapshot", (e) => {
       const d = JSON.parse((e as MessageEvent).data);
@@ -162,7 +181,7 @@ export default function Downloader() {
     es.onerror = () => {
       /* the browser reconnects automatically; snapshot resyncs state */
     };
-    return () => es.close();
+    return () => { window.clearTimeout(reset); es.close(); };
   }, [activeId, loadHistory]);
 
   useEffect(() => {
@@ -176,6 +195,9 @@ export default function Downloader() {
     setError("");
     if (!url.trim()) return setError("Enter the website address to download.");
     if (!confirm) return setError("Please confirm that you own this website or have permission to archive it.");
+    if (authEnabled && !authToken.trim()) return setError("Enter the server-provisioned authentication access token to protect credential endpoints.");
+    if (authEnabled && profiles.length === 0) return setError("Add at least one login profile, or turn authentication off.");
+    if (authEnabled && profiles.some((p) => !p.name.trim() || !p.loginUrl.trim() || !p.username.trim() || !p.password || !p.authenticatedSelector.trim())) return setError("Complete each profile, including its authenticated-state selector.");
     setBusy(true);
     try {
       const options = {
@@ -201,17 +223,66 @@ export default function Downloader() {
         maxQueryVariantsPerPath: s.maxQueryVariantsPerPath,
         retries: s.retries,
       };
-      const r = await fetch("/api/crawl", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ url, options, confirmPermission: true }) });
+      const headers: Record<string, string> = { "content-type": "application/json" };
+      if (authEnabled) headers.authorization = `Bearer ${authToken}`;
+      const authProfiles = authEnabled ? profiles.map(({ id, name, loginUrl, username, password, loginButtonSelector, usernameSelector, passwordSelector, authenticatedSelector, method }) => ({ id, name, loginUrl, username, password, loginButtonSelector, usernameSelector, passwordSelector, authenticatedSelector, method })) : undefined;
+      const r = await fetch("/api/crawl", { method: "POST", headers, body: JSON.stringify({ url, options, confirmPermission: true, ...(authProfiles ? { authProfiles } : {}) }) });
       const d = await r.json();
       if (!r.ok) throw new Error(d.error || "Could not start the crawl");
       setJob(null);
       setActiveId(d.id);
+      if (authEnabled) setProfiles((current) => current.map((p, i) => ({ ...p, password: "", jobId: d.ids?.[i], status: "logging-in" })));
+      setAuthToken("");
       void loadHistory();
     } catch (e) {
       setError((e as Error).message);
     } finally {
       setBusy(false);
     }
+  }
+
+  function updateProfile(id: string, patch: Partial<LoginProfile>) {
+    setProfiles((current) => current.map((p) => (p.id === id ? { ...p, ...patch } : p)));
+  }
+
+  function addProfile() {
+    if (profiles.length >= 5) return setError("The server limit is 5 login profiles per batch.");
+    setProfiles((current) => [...current, { id: crypto.randomUUID(), name: `Login ${current.length + 1}`, loginUrl: "", username: "", password: "", loginButtonSelector: "", usernameSelector: "", passwordSelector: "", authenticatedSelector: "", method: "form", editing: true, status: "not-configured" }]);
+    setError("");
+  }
+
+  async function testProfile(profile: LoginProfile) {
+    if (!authToken.trim()) return setError("Enter the server authentication access token before testing login.");
+    if (!profile.loginUrl || !profile.username || !profile.password || !profile.authenticatedSelector) return setError("Complete the login URL, credentials, and authenticated-state selector first.");
+    setTestingProfile(profile.id);
+    updateProfile(profile.id, { status: "logging-in" });
+    try {
+      const r = await fetch("/api/auth/test", { method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${authToken}` }, body: JSON.stringify({ profile: { id: profile.id, name: profile.name, loginUrl: profile.loginUrl, username: profile.username, password: profile.password, loginButtonSelector: profile.loginButtonSelector, usernameSelector: profile.usernameSelector, passwordSelector: profile.passwordSelector, authenticatedSelector: profile.authenticatedSelector, method: profile.method } }) });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.error || "Login verification failed");
+      updateProfile(profile.id, { status: "authenticated" });
+    } catch (e) {
+      updateProfile(profile.id, { status: "authentication-failed" });
+      setError((e as Error).message);
+    } finally {
+      setTestingProfile(null);
+    }
+  }
+
+  async function clearProfileSession(profile: LoginProfile): Promise<boolean> {
+    if (!profile.jobId) return true;
+    if (!authToken.trim()) { setError("Enter the server authentication access token to clear this session."); return false; }
+    const r = await fetch(`/api/crawl/${profile.jobId}/auth`, { method: "POST", headers: { authorization: `Bearer ${authToken}` } });
+    const data = await r.json();
+    if (!r.ok) { setError(data.error || "Could not clear credentials"); return false; }
+    updateProfile(profile.id, { status: "not-configured" });
+    void loadHistory();
+    return true;
+  }
+
+  async function removeLogin(profile: LoginProfile) {
+    if (profile.jobId && !(await clearProfileSession(profile))) return;
+    setProfiles((current) => current.filter((p) => p.id !== profile.id));
   }
 
   async function control(action: "pause" | "resume" | "cancel", id = activeId) {
@@ -277,7 +348,7 @@ export default function Downloader() {
       <header className="mx-auto max-w-6xl px-4 pt-12 pb-8 text-center text-white">
         <p className="mb-3 inline-block rounded-full bg-white/10 px-3 py-1 text-xs tracking-wide text-indigo-200">Deep crawler · Offline cloner · v2</p>
         <h1 className="text-3xl font-bold tracking-tight sm:text-5xl">Website Downloader</h1>
-        <p className="mx-auto mt-3 max-w-2xl text-slate-300">Enter one URL. The crawler discovers every public page in scope, downloads the assets each page needs, rewrites links for offline use and packages everything as a ZIP.</p>
+        <p className="mx-auto mt-3 max-w-2xl text-slate-300">Enter one URL. The crawler discovers in-scope pages, downloads eligible assets, rewrites links for offline use and packages everything as a ZIP. Authorized form-login profiles run in isolated sessions and produce separate archives.</p>
       </header>
 
       <main className="mx-auto max-w-6xl space-y-6 px-4 pb-16">
@@ -295,6 +366,52 @@ export default function Downloader() {
               {busy ? "Starting…" : "Start download"}
             </button>
           </div>
+          <details className="mt-4 rounded-xl border border-slate-200 bg-slate-50 p-4">
+            <summary className="cursor-pointer font-semibold text-slate-800">Authentication / Login Settings</summary>
+            <div className="mt-4 space-y-4">
+              <label className="flex items-center gap-2 text-sm font-medium text-slate-700">
+                <input type="checkbox" className="h-4 w-4 rounded border-slate-300 text-indigo-600" checked={authEnabled} onChange={(e) => setAuthEnabled(e.target.checked)} />
+                Enable Authentication
+              </label>
+              {authEnabled && <>
+                <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-xs leading-5 text-amber-900">
+                  Form login is limited to explicitly authorized profile runs. The server requires CRAWLER_AUTH_API_TOKEN and CRAWLER_CREDENTIAL_ENCRYPTION_KEY. An authenticated-state selector is mandatory; CAPTCHA/MFA are not bypassed. Each profile produces an isolated archive.
+                </div>
+                <div>
+                  <label className={label}>Server authentication access token</label>
+                  <input className={input} type="password" autoComplete="off" value={authToken} onChange={(e) => setAuthToken(e.target.value)} placeholder="Provided by your service administrator" />
+                </div>
+                <div className="flex items-center justify-between gap-3">
+                  <h3 className="font-semibold text-slate-800">Login Profiles ({profiles.length}/5)</h3>
+                  <button type="button" onClick={addProfile} disabled={profiles.length >= 5} className="rounded-lg bg-indigo-600 px-3 py-2 text-sm font-semibold text-white disabled:opacity-50">+ Add Login</button>
+                </div>
+                {profiles.length === 0 && <p className="text-sm text-slate-500">No profiles configured.</p>}
+                {profiles.map((p) => {
+                  const pjob = history.find((h) => h.id === p.jobId);
+                  const pstatus: AuthenticationStatus = pjob?.status === "paused" && pjob.stopReason?.includes("session expired") ? "session-expired" : pjob?.status === "running" ? "crawling" : pjob?.status === "completed" ? "completed" : pjob?.status === "failed" ? "authentication-failed" : !p.loginUrl || !p.username || (!p.password && !p.jobId) ? "waiting-for-credentials" : p.status;
+                  const statusLabel: Record<AuthenticationStatus, string> = { "not-configured": "Not configured", "waiting-for-credentials": "Waiting for credentials", "logging-in": "Logging in", "awaiting-manual-verification": "Awaiting manual verification", authenticated: "Authenticated (test; session closed)", "authentication-failed": "Authentication failed", "session-expired": "Session expired — resume to reauthenticate", crawling: "Crawling", completed: "Completed" };
+                  return <fieldset key={p.id} className="rounded-xl border border-slate-200 bg-white p-4">
+                    <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+                      <div><b>{p.name || "Unnamed profile"}</b><span className="ml-2 rounded-full bg-slate-100 px-2 py-1 text-xs">{statusLabel[pstatus]}</span></div>
+                      <div className="flex gap-2">
+                        <button type="button" onClick={() => updateProfile(p.id, { editing: !p.editing })} className="rounded border px-3 py-1 text-sm">{p.editing ? "Done editing" : "Edit Login"}</button>
+                        <button type="button" onClick={() => void removeLogin(p)} className="rounded border border-rose-200 px-3 py-1 text-sm text-rose-700">Remove Login</button>
+                        <button type="button" disabled={testingProfile === p.id} onClick={() => void testProfile(p)} className="rounded border border-indigo-200 px-3 py-1 text-sm text-indigo-700 disabled:opacity-50">{testingProfile === p.id ? "Testing…" : "Test Login"}</button>
+                      </div>
+                    </div>
+                    <div className="grid gap-3 sm:grid-cols-2">
+                      {([ ["name", "Profile Name"], ["loginUrl", "Login Page URL"], ["username", "Email / Username"], ["password", "Password"], ["loginButtonSelector", "Login Button Selector (optional)"], ["usernameSelector", "Username Field Selector (optional)"], ["passwordSelector", "Password Field Selector (optional)"], ["authenticatedSelector", "Authenticated-state selector (required for verification)" ] ] as const).map(([key, title]) => <div key={key}>
+                        <label className={label}>{title}</label>
+                        <input className={input} type={key === "password" ? "password" : "text"} autoComplete={key === "password" ? "new-password" : "off"} value={p[key]} disabled={!p.editing} onChange={(e) => updateProfile(p.id, { [key]: e.target.value })} placeholder={key === "authenticatedSelector" ? ".account-menu, [data-authenticated=true]" : undefined} />
+                      </div>)}
+                    </div>
+                    <p className="mt-2 text-xs text-slate-500">Authentication method: Standard email/password form. Login submissions are the only browser POSTs allowed, and only to this login page origin.</p>
+                    {p.jobId && <div className="mt-3 flex flex-wrap items-center justify-between gap-2 text-xs text-slate-600"><span>Pages discovered {pjob?.stats?.pagesDiscovered ?? 0} · downloaded {pjob?.stats?.pagesCrawled ?? 0}</span><div className="flex gap-2">{pjob?.status === "paused" && <button type="button" onClick={() => void control("resume", p.jobId!)} className="rounded border px-2 py-1">Reauthenticate &amp; Resume</button>}{pjob?.hasZip && <a href={`/api/crawl/${p.jobId}/download`} className="rounded border px-2 py-1">Download profile ZIP</a>}<button type="button" onClick={() => void clearProfileSession(p)} className="rounded border px-2 py-1">Remove Credentials / Clear Session</button></div></div>}
+                  </fieldset>;
+                })}
+              </>}
+            </div>
+          </details>
           <label className="mt-3 flex items-start gap-2 text-sm text-slate-700">
             <input type="checkbox" className="mt-0.5 h-4 w-4 rounded border-slate-300 text-indigo-600" checked={confirm} onChange={(e) => setConfirm(e.target.checked)} />
             <span>I own this website or have permission to archive it. I understand authentication, paywalls, CAPTCHAs and access controls are never bypassed.</span>

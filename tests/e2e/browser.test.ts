@@ -175,7 +175,6 @@ describe("visual comparison", () => {
       expect(has(r, "_report/" + row.files.source)).toBe(true);
       expect(has(r, "_report/" + row.files.local)).toBe(true);
       expect(row.missingResources).toEqual([]); // nothing in the offline copy still needs the network
-      // eslint-disable-next-line no-console
       console.log(`visual ${row.viewport}: ${row.mismatchPercent.toFixed(3)}% mismatch — ${row.verdict}`);
     }
     expect(read(r, "_report/crawl-report.html")).toContain("Pixel mismatch");

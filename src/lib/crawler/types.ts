@@ -167,6 +167,26 @@ export function sanitizeOptions(input: unknown): CrawlOptions {
 
 export type CrawlStatus = "idle" | "running" | "paused" | "completed" | "cancelled" | "failed" | "interrupted";
 
+/** UI/API states for a credential profile. The status never contains credential material. */
+export type AuthenticationStatus =
+  | "not-configured"
+  | "waiting-for-credentials"
+  | "logging-in"
+  | "awaiting-manual-verification"
+  | "authenticated"
+  | "authentication-failed"
+  | "session-expired"
+  | "crawling"
+  | "completed";
+
+export interface AuthProfileProgress {
+  profileId: string;
+  status: AuthenticationStatus;
+  pagesDiscovered: number;
+  pagesDownloaded: number;
+  jobId?: string;
+}
+
 export interface CrawlStats {
   pagesDiscovered: number;
   pagesCrawled: number;

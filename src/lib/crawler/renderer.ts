@@ -1,6 +1,7 @@
 import type { Browser, BrowserContext, Page } from "playwright-core";
 import { assertPublicUrl } from "./security";
 import { USER_AGENT } from "./http";
+import type { AuthProfile } from "./auth";
 
 export interface RenderResult {
   html: string;
@@ -18,6 +19,8 @@ export interface RenderOptions {
   mode: "js" | "full";
   timeoutMs: number;
   signal?: AbortSignal;
+  /** Optional page-navigation scope check; resources are still governed by SSRF policy. */
+  validateNavigation?: (url: string) => boolean;
 }
 
 /** Counting semaphore to keep the number of simultaneous browser contexts small. */
@@ -52,6 +55,9 @@ const INIT_SCRIPT = `(() => {
 export class Renderer {
   static lastError = "";
   private gate = new Gate(3);
+  private closeLoginWindows = new WeakMap<BrowserContext, () => void>();
+  private authContext: BrowserContext | null = null;
+  private navigationGuards = new WeakMap<BrowserContext, (url: string) => boolean>();
   private constructor(
     readonly browser: Browser,
     private allowPrivate: boolean,
@@ -76,7 +82,7 @@ export class Renderer {
   }
 
   /** A context whose every request is validated against the SSRF policy; mutating methods are refused. */
-  async guardedContext(viewport = { width: 1366, height: 900 }): Promise<BrowserContext> {
+  async guardedContext(viewport = { width: 1366, height: 900 }, loginOrigin?: string): Promise<BrowserContext> {
     const ctx = await this.browser.newContext({
       userAgent: USER_AGENT,
       viewport,
@@ -84,13 +90,20 @@ export class Renderer {
       acceptDownloads: false,
     });
     const verdicts = new Map<string, Promise<boolean>>();
+    let loginPhase = !!loginOrigin;
+    let loginPosts = 0;
+    this.closeLoginWindows.set(ctx, () => { loginPhase = false; });
     await ctx.route("**/*", async (route) => {
       const req = route.request();
       const u = req.url();
       try {
         if (/^(data|blob|about):/i.test(u)) return await route.continue();
         if (!/^https?:/i.test(u)) return await route.abort("blockedbyclient");
-        if (!["GET", "HEAD", "OPTIONS"].includes(req.method())) return await route.abort("blockedbyclient");
+        const authorizedLoginPost = loginPhase && loginPosts < 3 && req.method() === "POST" && req.resourceType() === "document" && new URL(u).origin === loginOrigin;
+        if (!["GET", "HEAD", "OPTIONS"].includes(req.method()) && !authorizedLoginPost) return await route.abort("blockedbyclient");
+        if (authorizedLoginPost) loginPosts++;
+        const navigationGuard = this.navigationGuards.get(ctx);
+        if (req.isNavigationRequest() && navigationGuard && !navigationGuard(u)) return await route.abort("blockedbyclient");
         const host = new URL(u).hostname;
         let v = verdicts.get(host);
         if (!v) {
@@ -109,13 +122,72 @@ export class Renderer {
     return ctx;
   }
 
-  async render(url: string, o: RenderOptions): Promise<RenderResult> {
+  /** Logs in only through the explicitly authorized login origin. A caller-supplied
+   * authenticated-state selector is required; redirects alone are not treated as success. */
+  async authenticate(profile: AuthProfile, timeoutMs: number): Promise<void> {
+    if (profile.method !== "form") throw new Error("Manual browser login is not available in the current server deployment.");
+    if (!profile.authenticatedSelector) throw new Error("Set an authenticated-state selector so login can be verified safely.");
+    await assertPublicUrl(profile.loginUrl, this.allowPrivate);
+    const origin = new URL(profile.loginUrl).origin;
+    const ctx = await this.guardedContext(undefined, origin);
+    const page = await ctx.newPage();
+    page.setDefaultTimeout(timeoutMs);
+    try {
+      await page.goto(profile.loginUrl, { waitUntil: "domcontentloaded", timeout: timeoutMs });
+      const userSelector = profile.usernameSelector || 'input[type="email"], input[name*="user" i], input[autocomplete="username"]';
+      const passSelector = profile.passwordSelector || 'input[type="password"]';
+      const user = page.locator(userSelector).first();
+      if (!(await user.count())) throw new Error("Could not locate the username field; configure its selector.");
+      await user.fill(profile.username);
+      const password = page.locator(passSelector).first();
+      if (!(await password.count())) {
+        await this.submitLogin(page, profile);
+        await page.waitForLoadState("domcontentloaded", { timeout: timeoutMs }).catch(() => {});
+      }
+      const passwordAfterStep = page.locator(passSelector).first();
+      if (!(await passwordAfterStep.count())) throw new Error("The login page did not reveal a password field after the username step.");
+      await passwordAfterStep.fill(profile.password);
+      await this.submitLogin(page, profile);
+      await page.waitForLoadState("domcontentloaded", { timeout: timeoutMs }).catch(() => {});
+      await page.locator(profile.authenticatedSelector).waitFor({ state: "visible", timeout: timeoutMs });
+      this.closeLoginWindows.get(ctx)?.();
+      this.authContext = ctx;
+    } catch (e) {
+      await ctx.close().catch(() => {});
+      const message = (e as Error).message;
+      const safe = ["Could not locate the username field; configure its selector.", "The login page did not reveal a password field after the username step."].includes(message)
+        ? message
+        : "Login failed or authenticated-state verification timed out. Check the supplied selectors and credentials.";
+      throw new Error(safe);
+    } finally {
+      await page.close().catch(() => {});
+    }
+  }
+
+  private async submitLogin(page: Page, profile: AuthProfile) {
+    if (profile.loginButtonSelector) {
+      await page.locator(profile.loginButtonSelector).click();
+      return;
+    }
+    const pass = page.locator(profile.passwordSelector || 'input[type="password"]').first();
+    if (await pass.count()) await pass.press("Enter");
+    else await page.locator(profile.usernameSelector || 'input[type="email"], input[name*="user" i]').first().press("Enter");
+  }
+
+  async clearAuthContext() {
+    const ctx = this.authContext;
+    this.authContext = null;
+    await ctx?.close().catch(() => {});
+  }
+
+  async render(url: string, o: RenderOptions, existingContext?: BrowserContext): Promise<RenderResult> {
     await this.gate.acquire();
     let ctx: BrowserContext | null = null;
     const onAbort = () => ctx?.close().catch(() => {});
     o.signal?.addEventListener("abort", onAbort, { once: true });
     try {
-      ctx = await this.guardedContext();
+      ctx = existingContext ?? this.authContext ?? await this.guardedContext();
+      if (o.validateNavigation) this.navigationGuards.set(ctx, o.validateNavigation);
       const page = await ctx.newPage();
       page.setDefaultTimeout(o.timeoutMs);
       const networkAssets = new Set<string>();
@@ -166,7 +238,7 @@ export class Renderer {
       };
     } finally {
       o.signal?.removeEventListener("abort", onAbort);
-      await ctx?.close().catch(() => {});
+      if (ctx && ctx !== this.authContext) await ctx.close().catch(() => {});
       this.gate.release();
     }
   }

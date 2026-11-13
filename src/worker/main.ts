@@ -15,7 +15,7 @@ import { CrawlWorker } from "./worker";
  */
 async function main() {
   if (!process.env.DATABASE_URL) throw new Error("DATABASE_URL is required");
-  // scripts/chromium-env.mjs resolves a Chromium binary (CHROMIUM_PATH, Playwright's, or the npm-packaged build).
+  // Resolve the packaged browser (or the explicit operator override), never a fallback chain.
   const helper = path.join(process.cwd(), "scripts", "chromium-env.mjs");
   const { applyChromiumEnv } = (await import(/* webpackIgnore: true */ helper)) as { applyChromiumEnv: () => Promise<{ ok: boolean; reason?: string; version?: string; source?: string }> };
   const chromium = await applyChromiumEnv();
@@ -25,8 +25,20 @@ async function main() {
     console.warn(`[worker] Chromium is not available (${chromium.reason}); only fast (HTTP-only) crawls will work.`);
   } else {
     const probe = await Renderer.create(false);
-    if (!probe) throw new Error(`Chromium was found but does not start: ${Renderer.lastError}`);
-    await probe.close();
+    if (!probe) {
+      console.error(`[worker] Chromium launch diagnostic:\n${Renderer.lastLaunchDiagnostic}`);
+      throw new Error(`Chromium was found but does not start: ${Renderer.lastError}`);
+    }
+    try {
+      const page = await probe.browser.newPage();
+      await page.setContent("<p>Chromium ready</p>");
+      if (await page.textContent("p") !== "Chromium ready") throw new Error("Browser page check failed");
+    } catch (error) {
+      console.error("[worker] Chromium page diagnostic:", error);
+      throw error;
+    } finally {
+      await probe.close();
+    }
     console.log(`[worker] ${chromium.version} via ${chromium.source}`);
   }
   if (process.env.WORKER_MIGRATE === "1") {

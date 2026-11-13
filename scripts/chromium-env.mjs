@@ -1,73 +1,86 @@
-// Resolves a Chromium binary that Playwright can drive, and the environment it needs.
-//
-// Order:
-//   1. CHROMIUM_PATH (explicit operator choice)
-//   2. Playwright's own managed browser (`npx playwright-core install chromium`)
-//   3. the `@sparticuz/chromium` npm package (a real Chromium build shipped through the npm registry),
-//      used where cdn.playwright.dev cannot be reached. Its shared libraries (NSS, NSPR, …) are
-//      unpacked next to it and put on LD_LIBRARY_PATH.
-//
-// Never silently returns "no browser": callers get a result with `ok: false` and the exact reason.
+// The worker uses the Chromium headless shell shipped by @sparticuz/chromium. Its
+// archive is a production dependency, so it survives a production-only install and
+// does not depend on a build user's Playwright cache being copied into the image.
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import zlib from "node:zlib";
-import { execFileSync } from "node:child_process";
 import { createRequire } from "node:module";
+import { execFileSync, spawn } from "node:child_process";
+import { createBrotliDecompress } from "node:zlib";
+import { pipeline } from "node:stream/promises";
 
 const require = createRequire(import.meta.url);
+let resolved;
 
-function version(exe, env) {
-  return execFileSync(exe, ["--version"], { env, encoding: "utf8", timeout: 30000 }).trim();
+async function unpackArchive(archive, destination) {
+  // Never restore archive ownership or modes. In particular tar-fs' default chown
+  // fails in restricted containers, even when the files belong to the current user.
+  const tar = spawn("tar", ["xf", "-", "--no-same-owner", "--no-same-permissions", "-C", destination], { stdio: ["pipe", "ignore", "pipe"] });
+  let stderr = "";
+  tar.stderr.on("data", chunk => { stderr += chunk; });
+  const finished = new Promise((resolve, reject) => {
+    tar.on("error", reject);
+    tar.on("close", code => code === 0 ? resolve() : reject(new Error(`tar failed (${code}): ${stderr}`)));
+  });
+  await Promise.all([pipeline(fs.createReadStream(archive), createBrotliDecompress(), tar.stdin), finished]);
 }
 
-export async function ensureChromium() {
-  const reasons = [];
-  if (process.env.CHROMIUM_PATH) {
-    try {
-      return { ok: true, source: "CHROMIUM_PATH", executablePath: process.env.CHROMIUM_PATH, libraryPath: process.env.LD_LIBRARY_PATH || "", version: version(process.env.CHROMIUM_PATH, process.env) };
-    } catch (e) {
-      reasons.push(`CHROMIUM_PATH=${process.env.CHROMIUM_PATH} does not run: ${String(e.message).split("\n")[0]}`);
-    }
+function validate(executablePath, env) {
+  fs.accessSync(executablePath, fs.constants.R_OK | fs.constants.X_OK);
+  if (process.platform === "linux") {
+    const libs = execFileSync("ldd", [executablePath], { env, encoding: "utf8", timeout: 30000 });
+    if (/not found/.test(libs)) throw new Error(`Chromium shared libraries missing:\n${libs}`);
   }
-  try {
-    const { chromium } = require("playwright-core");
-    const exe = chromium.executablePath();
-    if (exe && fs.existsSync(exe)) return { ok: true, source: "playwright", executablePath: exe, libraryPath: process.env.LD_LIBRARY_PATH || "", version: version(exe, process.env) };
-    reasons.push(`Playwright's managed Chromium is not installed (${exe || "no path"})`);
-  } catch (e) {
-    reasons.push(`playwright-core: ${String(e.message).split("\n")[0]}`);
-  }
-  try {
-    let pkgDir = path.dirname(require.resolve("@sparticuz/chromium"));
-    while (!fs.existsSync(path.join(pkgDir, "bin", "al2023.tar.br")) && path.dirname(pkgDir) !== pkgDir) pkgDir = path.dirname(pkgDir);
-    const mod = await import("@sparticuz/chromium");
-    const sparticuz = mod.default ?? mod;
-    const exe = await sparticuz.executablePath();
-    const libRoot = path.join(os.tmpdir(), "universal-clone-chromium-libs");
-    const libDir = path.join(libRoot, "lib");
-    if (!fs.existsSync(path.join(libDir, "libnspr4.so"))) {
-      fs.mkdirSync(libRoot, { recursive: true });
-      const tar = path.join(libRoot, "al2023.tar");
-      fs.writeFileSync(tar, zlib.brotliDecompressSync(fs.readFileSync(path.join(pkgDir, "bin", "al2023.tar.br"))));
-      execFileSync("tar", ["xf", tar, "-C", libRoot]);
-      fs.rmSync(tar, { force: true });
-    }
-    const libraryPath = [libDir, process.env.LD_LIBRARY_PATH].filter(Boolean).join(":");
-    return { ok: true, source: "@sparticuz/chromium", executablePath: exe, libraryPath, version: version(exe, { ...process.env, LD_LIBRARY_PATH: libraryPath }) };
-  } catch (e) {
-    reasons.push(`@sparticuz/chromium: ${String(e.message).split("\n")[0]}`);
-  }
-  const reason = reasons.join("; ");
-  return { ok: false, reason, reasons };
+  return execFileSync(executablePath, ["--version"], { env, encoding: "utf8", timeout: 30000 }).trim();
 }
 
-/** Applies the result to process.env so child processes (Chromium, next start, the worker) inherit it. */
+async function resolveChromium() {
+  let dir;
+  try {
+    // An explicit operator-supplied path is an override, never a fallback.
+    if (process.env.CHROMIUM_PATH) {
+      return { ok: true, source: "CHROMIUM_PATH", executablePath: process.env.CHROMIUM_PATH, libraryPath: process.env.LD_LIBRARY_PATH || "", version: validate(process.env.CHROMIUM_PATH, process.env) };
+    }
+    if (process.platform !== "linux" || process.arch !== "x64") throw new Error("The packaged Chromium requires Linux x64; set CHROMIUM_PATH explicitly on other platforms.");
+    const bin = path.join(path.dirname(require.resolve("@sparticuz/chromium")), "..", "bin");
+    // A fresh private directory prevents stale/incomplete binaries and shared /tmp
+    // ownership collisions. Nothing is written to the immutable application image.
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), "uc-chromium-"));
+    const executablePath = path.join(dir, "chromium");
+    await pipeline(fs.createReadStream(path.join(bin, "chromium.br")), createBrotliDecompress(), fs.createWriteStream(executablePath, { mode: 0o700 }));
+    fs.chmodSync(executablePath, 0o700);
+    await unpackArchive(path.join(bin, "fonts.tar.br"), dir);
+    await unpackArchive(path.join(bin, "al2023.tar.br"), dir);
+    await unpackArchive(path.join(bin, "swiftshader.tar.br"), dir);
+    const fontDir = path.join(dir, "fonts");
+    fs.accessSync(path.join(fontDir, "Open_Sans", "OpenSans-Regular.ttf"), fs.constants.R_OK);
+    // Use the bundled fonts without relying on /tmp/fonts or a system font setup.
+    const xmlPath = value => value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
+    fs.writeFileSync(path.join(dir, "fonts.conf"), `<?xml version="1.0"?><!DOCTYPE fontconfig SYSTEM "fonts.dtd"><fontconfig><dir>${xmlPath(fontDir)}</dir><cachedir>${xmlPath(path.join(dir, "font-cache"))}</cachedir></fontconfig>`);
+    const libraryPath = [path.join(dir, "lib"), dir, process.env.LD_LIBRARY_PATH].filter(Boolean).join(":");
+    const env = { ...process.env, LD_LIBRARY_PATH: libraryPath, FONTCONFIG_PATH: dir, FONTCONFIG_FILE: path.join(dir, "fonts.conf") };
+    const version = validate(executablePath, env);
+    const cleanupDir = dir;
+    process.once("exit", () => { try { fs.rmSync(cleanupDir, { recursive: true, force: true }); } catch {} });
+    return { ok: true, source: "@sparticuz/chromium", executablePath, libraryPath, fontconfigPath: dir, fontconfigFile: env.FONTCONFIG_FILE, version };
+  } catch (error) {
+    if (dir) fs.rmSync(dir, { recursive: true, force: true });
+    const reason = error instanceof Error ? error.message : String(error);
+    return { ok: false, reason, reasons: [reason] };
+  }
+}
+
+export function ensureChromium() {
+  return resolved ??= resolveChromium();
+}
+
 export async function applyChromiumEnv() {
   const r = await ensureChromium();
   if (r.ok) {
     process.env.CHROMIUM_PATH = r.executablePath;
     if (r.libraryPath) process.env.LD_LIBRARY_PATH = r.libraryPath;
+    if (r.fontconfigPath) process.env.FONTCONFIG_PATH = r.fontconfigPath;
+    if (r.fontconfigFile) process.env.FONTCONFIG_FILE = r.fontconfigFile;
   }
   return r;
 }

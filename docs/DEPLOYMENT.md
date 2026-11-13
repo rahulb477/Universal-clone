@@ -61,7 +61,7 @@ No terminal? Create the **first** administrator in the browser instead — set `
 
 ```bash
 npm run build
-npx playwright-core install --with-deps chromium     # or set CHROMIUM_PATH to an installed Chromium/Chrome
+npm run chromium:install                            # verify the packaged browser
 DATABASE_URL=… CRAWLER_CREDENTIAL_ENCRYPTION_KEY=… CRAWL_DATA_DIR=/var/lib/universal-clone npm start
 ```
 
@@ -85,7 +85,7 @@ Hostless Cloud — see [Hostless Cloud](#hostless-cloud--worker-deployment)):**
 
 ```bash
 npm ci
-npm run chromium:install                      # Chromium + its system libraries (falls back to the npm package)
+npm run chromium:install                      # verify the packaged headless Chromium
 DATABASE_URL=… CRAWLER_CREDENTIAL_ENCRYPTION_KEY=… S3_BUCKET=… S3_ACCESS_KEY_ID=… S3_SECRET_ACCESS_KEY=… \
 WORKER_HEALTH_PORT=8080 CRAWL_DATA_DIR=/var/lib/universal-clone npm run worker
 ```
@@ -120,25 +120,24 @@ Operational rules:
   a restart of the same worker for “resume” to continue where it stopped — on a host with ephemeral disks a resumed
   crawl starts again from the first page (signed-in sessions are still restored from the database).
 
-### Container example (not built or run during development — no Docker in that environment)
+### Container example
 
 ```dockerfile
-FROM node:22-bookworm
+FROM node:22-bookworm-slim
 WORKDIR /app
-# `scripts/` comes first: package.json's `preinstall` hook (scripts/check-toolchain.mjs) runs during npm ci.
 COPY package.json package-lock.json ./
 COPY scripts ./scripts
-RUN npm ci --no-audit --no-fund
+RUN npm ci --omit=dev --no-audit --no-fund
 COPY . .
 RUN npm run chromium:install
-ENV NODE_ENV=production CRAWL_DATA_DIR=/data
+ENV NODE_ENV=production CRAWL_DATA_DIR=/data WORKER_HEALTH_PORT=8080
+USER node
 CMD ["node", "--import", "./scripts/load-env.mjs", "--import", "tsx", "src/worker/main.ts"]
 ```
 
-`npm ci` installs the committed lockfile, and `playwright-core install` adds the browser that this
-`playwright-core` version expects plus the system libraries it needs (no `CHROMIUM_PATH` needed). `/data` must be a
-volume writable by the container user and `CRAWL_DATA_DIR` must point at it. If you prefer a Playwright-provided image
-instead, its tag must match the installed `playwright-core` version.
+Mount `/data` writable by `node`; `/tmp` must also be writable and executable. The compressed browser is
+installed in production `node_modules`, not in a build-user cache. The build check does not replace the startup
+check in the final image. This example Docker image has not been tested on Hostless.
 
 **This deployment was not performed during development.** What was exercised is the same split on one machine: the
 production web build with no browser available, separate worker processes, a real PostgreSQL server and an S3 API
@@ -214,7 +213,7 @@ checking — Hostless applies the file on every deployment and reconciles the `w
 | Build system | **Detect automatically** (Railpack) — no Dockerfile |
 | Working directory | `/` |
 | Build context directory | `/` |
-| Build command | `npm ci --no-audit --no-fund && npm run chromium:install` |
+| Build command | `npm ci --omit=dev --no-audit --no-fund && npm run chromium:install` |
 | Start command | `npm run worker` |
 | Post build command | *leave empty* |
 | Health check | `http`, path `/healthz`, interval `10` s (only if the resource offers health checks) |
@@ -222,10 +221,12 @@ checking — Hostless applies the file on every deployment and reconciles the `w
 | CPU / memory per replica | min `0.5` vCPU / `1024` MB, max `2` vCPU / `4096` MB |
 | Persistent volume | mount at `/data`, then set `CRAWL_DATA_DIR=/data` |
 
-`npm ci` installs the committed lockfile. `npm run chromium:install` downloads the browser this `playwright-core`
-version expects, together with the system libraries it needs, and falls back to the npm-packaged
-`@sparticuz/chromium` (a regular dependency) when Playwright's download is blocked. It verifies the result and fails the
-build if no browser is usable, so the worker never starts half-configured with `Chromium is not available: …`.
+The pinned `@sparticuz/chromium` package and its matching-major `playwright-core` are production dependencies.
+`npm run chromium:install` extracts the package temporarily, checks executable permissions and shared libraries,
+then launches a real page; it fails the build on error. The runtime extracts afresh into a private directory, so
+nothing relies on `/root/.cache`, a build-stage `/tmp`, or ownership-changing operations. Do not configure
+`CHROMIUM_PATH` on Hostless unless deliberately replacing the packaged binary; an invalid override fails rather
+than falling back. Redeploy with the updated command and lockfile.
 
 **Environment variables** (Hostless **Settings → Environment**, all required unless marked):
 
@@ -244,9 +245,14 @@ build if no browser is usable, so the worker never starts half-configured with `
 Never put `PORT` in the worker environment: it is a web-app variable, and the worker’s own port is
 `WORKER_HEALTH_PORT`.
 
-**If Playwright's browser cannot be downloaded during the build.** The image then runs the npm-packaged
-`@sparticuz/chromium`, which ships a Chromium build plus its shared libraries. That package is a **dependency**, so it
-survives an install that omits dev dependencies (`npm ci --omit=dev`, the Railpack default for production images).
+**Runtime requirements.** Use a Linux x86-64 glibc runtime with `tar` and `ldd` on PATH, a writable,
+executable `/tmp` (or set `TMPDIR` to one), and enough free space for the extracted browser and libraries
+(allow at least 512 MB per worker, plus browser profiles and crawl data). The compressed npm package supplies
+Chromium, NSS/NSPR libraries, SwiftShader and Open Sans; the base image still needs glibc and libgcc. Startup
+checks permissions, missing shared libraries, and a real browser page, and prints the full Playwright launch log
+on failure. Existing `/tmp/fonts` is not used. A normal shutdown removes the private extraction; after SIGKILL,
+the host may need to clean stale `uc-chromium-*` directories, without removing active workers' directories.
+Headed local browsing needs an explicit compatible full browser via `CHROMIUM_PATH`; the packaged build is headless.
 
 **Build vs. runtime.** No `next build` is needed — the worker runs TypeScript directly through `tsx`. A Hostless App
 deployed from the same repository, however, must build the web tier: build command `npm ci && npm run build`,
@@ -263,7 +269,7 @@ start command `npm start`.
 5. **Create worker** and follow the log. Success looks like:
 
    ```
-   [worker] Chromium 153.0.8010.0 via playwright
+   [worker] Chromium 153.0.8010.0 via @sparticuz/chromium
    [worker crawl-worker-…] started (max 5 concurrent jobs, storage: s3)
    ```
 
@@ -294,7 +300,7 @@ Standalone workers, Railpack builds).
 |---|---|---|
 | `Cannot read properties of null (reading 'edgesOut')` | an install that ignored the lockfile (for example `npm install` instead of `npm ci`) resolved `vitest@5`'s peer set on an npm older than 11.6 | use the build command above; make sure `package-lock.json` reached the build (it must not be git-ignored) |
 | `npm ci can only install packages when your package.json and package-lock.json … are in sync` (EUSAGE) | `package.json` changed without regenerating the lockfile | `npm install --package-lock-only` with npm 11, commit both files |
-| `Chromium is not available: …` at start | the build skipped `npm run chromium:install`, or dev dependencies were pruned along with the npm-packaged browser | keep the build command as documented, or set `CHROMIUM_PATH` to a browser in the image |
+| `Chromium is not available: …` at start | production package missing, invalid override, unwritable/noexec temporary directory, or missing runtime libraries | check the runtime requirements and full startup log; unset stale `CHROMIUM_PATH` and redeploy |
 | Worker starts, then exits with `DATABASE_URL is required` | environment variables not applied | add them in **Settings → Environment** and redeploy |
 | `object storage upload failed: HTTP 403` | wrong bucket or credentials | fix `S3_*`; this fails loudly rather than storing nothing |
 | Unhealthy / restarted repeatedly | health check pointed at `/` instead of `/healthz`, or `WORKER_HEALTH_PORT` unset | set the path to `/healthz` and the port to `8080` |
@@ -317,15 +323,12 @@ endpoint was contacted while doing so, is recorded in [TESTING-REPORT.md](TESTIN
 
 ## Chromium
 
-The worker looks for a browser in this order: `CHROMIUM_PATH`, Playwright's own download, then the npm package
-`@sparticuz/chromium` — a regular **dependency** (not a dev dependency) precisely so it survives an install that omits
-dev dependencies. `npm run chromium:check` prints what was found.
-
-`npm run chromium:install` is the build step: it tries `playwright-core install --with-deps chromium` (browser plus the
-OS libraries), then `playwright-core install chromium` if the image already has the libraries, and finally falls back to
-the npm-packaged Chromium. It then verifies the result with the worker's own resolver, so a build without a usable
-browser fails at build time rather than at the first crawl. If Playwright's own download cannot be reached (a build
-network that only allows the npm registry), the npm-packaged Chromium is what runs.
+The standalone and inline workers use the npm-packaged headless Chromium, extracted at runtime into a private
+temporary directory. `CHROMIUM_PATH`, if set, explicitly replaces it; there is no automatic fallback.
+`npm run chromium:check` checks executable permissions, shared libraries and version. `npm run chromium:install`
+additionally launches a real page; it is a verification step, not a persistent download. A standalone worker
+repeats a page launch at startup and reports the complete Playwright error on failure. See the Hostless runtime
+requirements above for the image, font and temporary-directory requirements.
 
 The crawler launches the browser with `--no-sandbox` because most containers cannot provide the sandbox's kernel
 features; set `CRAWLER_CHROMIUM_SANDBOX=1` where they can (recommended on a VM).

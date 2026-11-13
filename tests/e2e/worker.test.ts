@@ -95,6 +95,12 @@ describe("worker process", () => {
     await expect(bootWorker(workerEnv({ S3_SECRET_ACCESS_KEY: "wrong-secret" }))).rejects.toThrow(/object storage upload failed: HTTP 403/);
   });
 
+  it("logs the browser process failure, not just Playwright's generic first line", async () => {
+    // Node is a dynamically linked executable with a working --version, but it
+    // rejects Chromium's launch flags and prints the real error on stderr.
+    await expect(bootWorker(workerEnv({ CHROMIUM_PATH: process.execPath }))).rejects.toThrow(/bad option/);
+  });
+
   it("picks up a queued job, uploads the archive to object storage, and the web tier hands out a short-lived download link to the owner only", async () => {
     const r = await user.post("/api/crawl", { url: fx.url + "/", confirmPermission: true, options: { maxPages: 12, delayMs: 0, retryBaseMs: 5 } });
     const { id } = await r.json();
@@ -103,7 +109,9 @@ describe("worker process", () => {
     const healthPort = await freePort();
     const w = await startWorker({ WORKER_ID: "worker-a", WORKER_HEALTH_PORT: String(healthPort), WORKER_HEALTH_HOST: "127.0.0.1" });
     expect(w.output()).toMatch(/\[worker\] Chromium [\d.]+ via /);
-    const health = await fetch(`http://127.0.0.1:${healthPort}/healthz`);
+    const health = await waitFor("worker health listener", async () => {
+      try { return await fetch(`http://127.0.0.1:${healthPort}/healthz`); } catch { return null; }
+    });
     expect(health.status).toBe(200);
     expect((await health.json()).ok).toBe(true);
     expect((await fetch(`http://127.0.0.1:${healthPort}/`)).status).toBe(404);

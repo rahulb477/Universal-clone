@@ -271,7 +271,11 @@ describe("crawl API", () => {
       const job = async () => (await alice.json(`/api/crawl/${id}`)).job;
       await waitFor("first pages", async () => (await job()).stats?.pagesCrawled >= 2);
       expect((await ctl("pause")).status).toBe(200);
-      const a = await waitFor("paused", async () => ((await job()).status === "paused" ? job() : null));
+      await waitFor("paused", async () => ((await job()).status === "paused" ? job() : null));
+      // An already in-flight request may finish after the paused status is set;
+      // compare two settled samples instead of racing that request and DB flush.
+      await new Promise((r) => setTimeout(r, 1200));
+      const a = await job();
       await new Promise((r) => setTimeout(r, 1200));
       const b = await job();
       expect(b.status).toBe("paused");

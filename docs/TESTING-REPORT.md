@@ -286,12 +286,16 @@ depth ceiling of 20); those were corrected in the tests and are not listed as pr
 * **Database outage during a crawl**, a network partition between worker and database, and a worker's disk filling up.
 * Saved-session expiry by TTL (`CRAWLER_SESSION_TTL_HOURS`) was not exercised by a test.
 * HTTPS/TLS error paths, subdomain crawling with real DNS names, Windows/macOS extraction of the generated paths.
+* **Hostless Cloud, Vercel, container registries and cloud buckets**: no deployment was performed. The worker build and
+  start commands documented in [DEPLOYMENT.md](DEPLOYMENT.md) were verified locally (clean `npm ci`, `npm run
+  typecheck`, `npm run build`, `npm run worker` against a real PostgreSQL, `GET /healthz` → `200`, clean `SIGTERM`
+  shutdown), not on the platforms themselves.
 * No security review or penetration test by anyone other than the author.
 
 ## Reproduce
 
 ```bash
-npm install
+npm ci                   # Node 22 / npm 11; installs the committed lockfile
 npm run typecheck && npm run lint
 npm run build            # the e2e suites drive the production build
 npm test                 # ≈ 9 minutes; starts its own PostgreSQL and S3 test servers; needs a Chromium (see above)

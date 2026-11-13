@@ -1,0 +1,37 @@
+# Hostless configuration for the Universal Clone worker.
+#
+# The worker is a long-running background process (`npm run worker`), so it is deployed as a
+# Hostless **Standalone worker**, not as a web app. `hostless.yaml` is repo-wide, so it is written
+# for that resource; a Hostless App built from this repository needs its own settings in
+# **Settings > General** (see docs/DEPLOYMENT.md).
+#
+# Build: install exactly the committed lockfile, then pre-install Chromium. No Next.js build is
+# needed — the worker runs TypeScript through `tsx`.
+#
+# Runtime: one replica per `CRAWL_DATA_DIR`. Several replicas are safe because every job is claimed
+# from PostgreSQL with `FOR UPDATE SKIP LOCKED`; keep `replicas: 1` unless the disk is shared.
+
+# `npm ci` runs the `preinstall` hook in scripts/check-toolchain.mjs, so the build context must contain
+# scripts/ (it does: this is the repository root).
+build:
+  system: auto
+  command: "npm ci --no-audit --no-fund && npm run chromium:install"
+
+# `npm run worker` is `node --import ./scripts/load-env.mjs --import tsx src/worker/main.ts`.
+# Do not wrap it in a shell or a fork: the supervisor's SIGTERM must reach this exact process so it
+# can save running crawls and exit 0.
+start_command: "npm run worker"
+
+working_directory: "/"
+build_context_directory: "/"
+
+# The worker serves GET /healthz on WORKER_HEALTH_PORT (set it to 8080 in the environment) while the
+# database is reachable.
+workers:
+  - name: "crawl-worker"
+    command: "npm run worker"
+    min_cpu_per_replica: 0.5
+    max_cpu_per_replica: 2
+    min_memory_per_replica: 1024
+    max_memory_per_replica: 4096
+    replicas: 1

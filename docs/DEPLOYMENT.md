@@ -26,7 +26,7 @@ without a worker, crawls stay `queued` and the UI shows “No crawl worker onlin
 ## Common steps
 
 ```bash
-npm install
+npm ci                                        # installs the committed lockfile (npm 11 / Node 22 — see Toolchain)
 openssl rand -base64 32                       # → CRAWLER_CREDENTIAL_ENCRYPTION_KEY (same value for web and worker)
 npm run db:migrate                            # creates/updates the schema; safe to run on every deploy
 USER_PASSWORD='…' npm run user:create -- you@example.com admin   # or omit USER_PASSWORD and type it on stdin
@@ -46,9 +46,14 @@ No terminal? Create the **first** administrator in the browser instead — set `
   [ADMIN-SETUP.md](ADMIN-SETUP.md).
 * Registration is **closed** by default: accounts exist only when an operator creates them. `AUTH_REGISTRATION=invite`
   plus `AUTH_INVITE_CODE` (≥ 16 characters) or `AUTH_REGISTRATION=open` enable self-service sign-up.
-* The repository does not commit a `package-lock.json` (it is git-ignored), so installs resolve versions within the
-  ranges in `package.json`. For reproducible production builds generate a lockfile once, keep it with your deployment,
-  and use `npm ci`.
+* **`package-lock.json` is committed and must stay committed.** Deployments install with `npm ci`, which installs
+  exactly the locked tree and never re-resolves it. After changing a dependency, regenerate the lockfile with npm 11
+  (`npm install --package-lock-only`) and commit both files in the same change — see
+  [Toolchain and reproducible installs](#toolchain-and-reproducible-installs).
+* **Node.js 22 and npm 11** are the supported toolchain (`engines`, `.nvmrc`, `.node-version`, `.tool-versions`,
+  `packageManager`). `npm install` on old npm 10 releases can die with npm's own
+  `Cannot read properties of null (reading 'edgesOut')`; `npm ci` from the committed lockfile does not, and
+  `scripts/check-toolchain.mjs` (wired as `preinstall`) stops the install with an explanation instead of a stack trace.
 * The command-line tools (`worker`, `db:migrate`, `user:create`) read `.env` from the working directory when it exists;
   real environment variables take precedence.
 
@@ -75,11 +80,12 @@ redeploy — see “First administrator in the browser” below. `CRAWLER_WORKER
 closes after `SSE_MAX_SECONDS` (default 280) and the browser reconnects where it left off, so set the function's
 maximum duration to at least that or lower the variable to fit your plan.
 
-**Worker (any host that keeps a process running: a VM, Fly.io, Railway, Render, ECS, a Kubernetes Deployment):**
+**Worker (any host that keeps a process running: a VM, Fly.io, Railway, Render, ECS, a Kubernetes Deployment, or
+Hostless Cloud — see [Hostless Cloud](#hostless-cloud--worker-deployment)):**
 
 ```bash
-npm install
-npx playwright-core install --with-deps chromium
+npm ci
+npm run chromium:install                      # Chromium + its system libraries (falls back to the npm package)
 DATABASE_URL=… CRAWLER_CREDENTIAL_ENCRYPTION_KEY=… S3_BUCKET=… S3_ACCESS_KEY_ID=… S3_SECRET_ACCESS_KEY=… \
 WORKER_HEALTH_PORT=8080 CRAWL_DATA_DIR=/var/lib/universal-clone npm run worker
 ```
@@ -117,18 +123,22 @@ Operational rules:
 ### Container example (not built or run during development — no Docker in that environment)
 
 ```dockerfile
-FROM mcr.microsoft.com/playwright:v1.65.0-noble
+FROM node:22-bookworm
 WORKDIR /app
-COPY package.json ./
-RUN npm install
+# `scripts/` comes first: package.json's `preinstall` hook (scripts/check-toolchain.mjs) runs during npm ci.
+COPY package.json package-lock.json ./
+COPY scripts ./scripts
+RUN npm ci --no-audit --no-fund
 COPY . .
+RUN npm run chromium:install
 ENV NODE_ENV=production CRAWL_DATA_DIR=/data
-USER pwuser
 CMD ["node", "--import", "./scripts/load-env.mjs", "--import", "tsx", "src/worker/main.ts"]
 ```
 
-Treat this as a starting point: the image tag must match the installed `playwright-core` version (the image carries
-the browser Playwright expects, so no `CHROMIUM_PATH` is needed), and `/data` must be writable by the container user.
+`npm ci` installs the committed lockfile, and `playwright-core install` adds the browser that this
+`playwright-core` version expects plus the system libraries it needs (no `CHROMIUM_PATH` needed). `/data` must be a
+volume writable by the container user and `CRAWL_DATA_DIR` must point at it. If you prefer a Playwright-provided image
+instead, its tag must match the installed `playwright-core` version.
 
 **This deployment was not performed during development.** What was exercised is the same split on one machine: the
 production web build with no browser available, separate worker processes, a real PostgreSQL server and an S3 API
@@ -151,6 +161,144 @@ endpoint (see [TESTING-REPORT.md](TESTING-REPORT.md)). No Vercel project, manage
 No terminal, no `npm run` and no database client is needed. Steps, screenshots-in-words, recovery and
 troubleshooting table: [ADMIN-SETUP.md](ADMIN-SETUP.md).
 
+## Toolchain and reproducible installs
+
+The dependency tree is resolved once, on purpose: **`package-lock.json` is committed** (it used to be git-ignored) and
+every automated build installs with `npm ci`.
+
+| Piece | Value | Where |
+|---|---|---|
+| Node.js | `22` (supported: `>=20.18.1 <25`) | `engines.node`, `.nvmrc`, `.node-version`, `.tool-versions` (`22.22.3`) |
+| npm | `11.21.2` (minimum `>=10.9.0`) | `engines.npm`, `packageManager`, `.tool-versions`, `volta` |
+| Install | `npm ci` | `hostless.yaml`, container example, CI |
+
+`npm ci` exists for exactly this situation: it installs only what the lockfile names and never rebuilds the ideal
+dependency tree. Verify it locally with `npm ci && npm run typecheck`.
+
+### Why builds used to fail with `Cannot read properties of null (reading 'edgesOut')`
+
+That message is a crash inside npm's dependency resolver (`@npmcli/arborist`), not a problem with the project's code or
+with any single dependency version. Arborist builds a virtual tree in which each dependency is an edge pointing at the
+node that provides it. Before npm 11.6 it did not reliably guard the case where a provider node is deduplicated or
+pruned away and an edge still points at the empty slot; when it then walks a **peer** set, it reads `.edgesOut` from
+`null` and throws a raw `TypeError` that exits the install with code 1
+([npm/cli#9787](https://github.com/npm/cli/issues/9787)).
+
+Two things in this repository made that reachable and made it look random:
+
+1. **No lockfile was committed**, so every build re-resolved the whole graph from the registry. Peer sets that resolve
+   one day can stop resolving the next, without a single change in this repository.
+2. **`vitest@5` pulls in a large optional peer set** (`vite`, `jsdom`, `@vitest/*`, `@vitest/browser-playwright`).
+   That is the peer graph npm 10 crashes on. It is a dev dependency, but `npm install` resolves dev dependencies even
+   when it does not install them (`--omit=dev` included), so the worker build hit it too.
+
+`npm ci` never enters that code path, and npm 11.6+ guards it. Both fixes are in place here, and the toolchain is
+pinned so a build image cannot quietly go back to an npm that crashes.
+
+If an install still fails this way (an install that ignores the lockfile, for example), the fix is not
+`--force` or `--legacy-peer-deps`: use `npm ci`, or `npx npm@11 install` once and commit the lockfile it writes.
+
+## Hostless Cloud — worker deployment
+
+The worker is a **long-running background process** (`npm run worker`): it claims jobs from PostgreSQL, starts
+Chromium and uploads archives. It is not a web app, so deploy it on Hostless as a **Standalone worker**
+(**Workers → Create worker → Standalone**), from this repository. A Hostless *App* for the Next.js web tier is a
+separate resource with its own settings; the web tier needs no browser and no `npm run worker`.
+
+The repository ships the configuration in [`hostless.yaml`](../hostless.yaml), so the dashboard fields below only need
+checking — Hostless applies the file on every deployment and reconciles the `workers` list with it.
+
+| Hostless setting | Value |
+|---|---|
+| Type | **Standalone worker** |
+| Build system | **Detect automatically** (Railpack) — no Dockerfile |
+| Working directory | `/` |
+| Build context directory | `/` |
+| Build command | `npm ci --no-audit --no-fund && npm run chromium:install` |
+| Start command | `npm run worker` |
+| Post build command | *leave empty* |
+| Health check | `http`, path `/healthz`, interval `10` s (only if the resource offers health checks) |
+| Replicas | `1` (see “Disk”, below) |
+| CPU / memory per replica | min `0.5` vCPU / `1024` MB, max `2` vCPU / `4096` MB |
+| Persistent volume | mount at `/data`, then set `CRAWL_DATA_DIR=/data` |
+
+`npm ci` installs the committed lockfile. `npm run chromium:install` downloads the browser this `playwright-core`
+version expects, together with the system libraries it needs, and falls back to the npm-packaged
+`@sparticuz/chromium` (a regular dependency) when Playwright's download is blocked. It verifies the result and fails the
+build if no browser is usable, so the worker never starts half-configured with `Chromium is not available: …`.
+
+**Environment variables** (Hostless **Settings → Environment**, all required unless marked):
+
+| Variable | Value |
+|---|---|
+| `DATABASE_URL` | the same PostgreSQL database the web app uses |
+| `DATABASE_SSL` | `require` when the provider needs TLS |
+| `CRAWLER_CREDENTIAL_ENCRYPTION_KEY` | the same 32-byte key as the web app (`openssl rand -base64 32`) |
+| `CRAWLER_WORKER_MODE` | `external` |
+| `ARCHIVE_STORAGE` | `s3` with `S3_BUCKET`, `S3_REGION`, `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY` (`S3_ENDPOINT` for S3-compatible services) — or `local` with `CRAWL_DATA_DIR` on the mounted volume |
+| `CRAWL_DATA_DIR` | `/data` (the volume mount path) — scratch space for one crawl |
+| `WORKER_HEALTH_PORT` | `8080`, so `GET /healthz` answers for the health check |
+| `WORKER_MIGRATE` | `1` once, if the web app does not migrate on its own (see below) |
+| `NODE_VERSION` | `22` — optional on Hostless; `engines.node` and `.nvmrc` already select it |
+
+Never put `PORT` in the worker environment: it is a web-app variable, and the worker’s own port is
+`WORKER_HEALTH_PORT`.
+
+**If Playwright's browser cannot be downloaded during the build.** The image then runs the npm-packaged
+`@sparticuz/chromium`, which ships a Chromium build plus its shared libraries. That package is a **dependency**, so it
+survives an install that omits dev dependencies (`npm ci --omit=dev`, the Railpack default for production images).
+
+**Build vs. runtime.** No `next build` is needed — the worker runs TypeScript directly through `tsx`. A Hostless App
+deployed from the same repository, however, must build the web tier: build command `npm ci && npm run build`,
+start command `npm start`.
+
+**Deployment steps**
+
+1. **Workers → Create worker → Standalone**, choose this repository and branch.
+2. Keep **Detect automatically**; check the build and start commands against the table (Hostless reads `hostless.yaml`
+   on the first deployment, so they are normally already correct).
+3. Add the environment variables above. Copy `DATABASE_URL` and `CRAWLER_CREDENTIAL_ENCRYPTION_KEY` from the web app —
+   they must be identical on both.
+4. Create and attach a volume mounted at `/data` if you use `ARCHIVE_STORAGE=local`.
+5. **Create worker** and follow the log. Success looks like:
+
+   ```
+   [worker] Chromium 153.0.8010.0 via playwright
+   [worker crawl-worker-…] started (max 5 concurrent jobs, storage: s3)
+   ```
+
+   The web app then reports `{"ok":true,"worker":"online"}` on `GET /api/health`.
+
+**First deploy on an empty database.** If the web app is not deployed yet, run the schema once with `WORKER_MIGRATE=1`
+(apply the migrations at start), or run `npm run db:migrate` once from any machine with `DATABASE_URL` set. Leave
+`WORKER_MIGRATE` unset afterwards; every replica migrating on each restart is pointless work.
+
+**Disk and replicas.** `CRAWL_DATA_DIR` is scratch space for one crawl and must survive a worker restart for *Resume*
+to continue where it stopped. The root filesystem of a Hostless workload is read-only, so always mount the volume and
+point `CRAWL_DATA_DIR` at it. Jobs are claimed with `SELECT … FOR UPDATE SKIP LOCKED`, so several replicas are safe, but
+each replica needs its own writable scratch space — keep `replicas: 1` unless they share the volume.
+
+**Shutdown.** Hostless sends `SIGTERM` on redeploy and restart. The worker saves running crawls, marks them
+`interrupted` and exits 0. Start it through `npm run worker` exactly as written: a wrapper that forks a child (for
+example the `tsx` CLI) would take the signal instead of the worker, leaving a crawl running with nothing saved.
+
+**Not verified.** No Hostless deployment was performed while preparing this document; no account, project or volume was
+created. What was verified locally is the same toolchain and commands from a clean checkout: `npm ci`, `npm run
+typecheck`, `npm run build`, `npm run worker` against a real PostgreSQL (`[worker] started …`, `GET /healthz` → `200`)
+and a clean `SIGTERM` shutdown. Hostless was only used as documented by its own docs (`hostless.yaml`,
+Standalone workers, Railpack builds).
+
+**If the build fails on Hostless**
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| `Cannot read properties of null (reading 'edgesOut')` | an install that ignored the lockfile (for example `npm install` instead of `npm ci`) resolved `vitest@5`'s peer set on an npm older than 11.6 | use the build command above; make sure `package-lock.json` reached the build (it must not be git-ignored) |
+| `npm ci can only install packages when your package.json and package-lock.json … are in sync` (EUSAGE) | `package.json` changed without regenerating the lockfile | `npm install --package-lock-only` with npm 11, commit both files |
+| `Chromium is not available: …` at start | the build skipped `npm run chromium:install`, or dev dependencies were pruned along with the npm-packaged browser | keep the build command as documented, or set `CHROMIUM_PATH` to a browser in the image |
+| Worker starts, then exits with `DATABASE_URL is required` | environment variables not applied | add them in **Settings → Environment** and redeploy |
+| `object storage upload failed: HTTP 403` | wrong bucket or credentials | fix `S3_*`; this fails loudly rather than storing nothing |
+| Unhealthy / restarted repeatedly | health check pointed at `/` instead of `/healthz`, or `WORKER_HEALTH_PORT` unset | set the path to `/healthz` and the port to `8080` |
+
 ## Archive storage
 
 | `ARCHIVE_STORAGE` | Behaviour |
@@ -170,9 +318,17 @@ endpoint was contacted while doing so, is recorded in [TESTING-REPORT.md](TESTIN
 ## Chromium
 
 The worker looks for a browser in this order: `CHROMIUM_PATH`, Playwright's own download, then the npm package
-`@sparticuz/chromium` if it is installed (it is a dev dependency used by the test suite). `npm run chromium:check`
-prints what was found. The crawler launches it with `--no-sandbox` because most containers cannot provide the sandbox's
-kernel features; set `CRAWLER_CHROMIUM_SANDBOX=1` where they can (recommended on a VM).
+`@sparticuz/chromium` — a regular **dependency** (not a dev dependency) precisely so it survives an install that omits
+dev dependencies. `npm run chromium:check` prints what was found.
+
+`npm run chromium:install` is the build step: it tries `playwright-core install --with-deps chromium` (browser plus the
+OS libraries), then `playwright-core install chromium` if the image already has the libraries, and finally falls back to
+the npm-packaged Chromium. It then verifies the result with the worker's own resolver, so a build without a usable
+browser fails at build time rather than at the first crawl. If Playwright's own download cannot be reached (a build
+network that only allows the npm registry), the npm-packaged Chromium is what runs.
+
+The crawler launches the browser with `--no-sandbox` because most containers cannot provide the sandbox's kernel
+features; set `CRAWLER_CHROMIUM_SANDBOX=1` where they can (recommended on a VM).
 
 ## Embedding in another site
 

@@ -58,7 +58,8 @@ export async function ensureChromium() {
   } catch (e) {
     reasons.push(`@sparticuz/chromium: ${String(e.message).split("\n")[0]}`);
   }
-  return { ok: false, reason: reasons.join("; ") };
+  const reason = reasons.join("; ");
+  return { ok: false, reason, reasons };
 }
 
 /** Applies the result to process.env so child processes (Chromium, next start, the worker) inherit it. */

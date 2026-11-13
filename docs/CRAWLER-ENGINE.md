@@ -38,8 +38,9 @@ c.pause(); c.resumeCrawl(); c.cancel();
 
 ## States
 
-`idle → running ⇄ paused → completed | cancelled | failed`; `interrupted` is assigned by the job manager to jobs that were
-running when the server restarted. `completed` may carry a `stopReason` (time limit, total size limit) — the archive is then
+`idle → running ⇄ paused → completed | cancelled | failed`. `interrupted` means the worker stopped while the crawl was
+running — set by the worker itself on a graceful shutdown, or by another worker when the heartbeat goes stale. (The
+job row additionally has `queued` before a worker claims it.) Waiting for a person to sign in counts as `paused`. `completed` may carry a `stopReason` (time limit, total size limit) — the archive is then
 explicitly partial.
 
 ## Stats (all real counters)
@@ -55,9 +56,13 @@ continues — there is no fabricated percentage.
 * **Pause**: workers stop taking new URLs; in-flight pages finish. **Resume** releases the gate.
 * **Cancel**: aborts all in-flight requests (`AbortController`), returns unfinished items to the queue, then finalises and
   packages what exists (`status: cancelled`, usable ZIP).
-* **Snapshots**: `state.json` is written every ~3 s, on finalise and on demand. `JobManager.resume(id)` restarts an
-  *interrupted* job from it; finished pages are not fetched again (verified in the test-suite by copying a snapshot into a new
-  working directory, see TESTING-REPORT.md — a real process kill was not tested).
+* **Snapshots**: `state.json` is written at most every ~3 s, on finalise and when the worker is told to stop
+  (`suspend()`). Resuming an *interrupted* job continues from it; finished pages are not fetched again. Verified by
+  sending SIGTERM and SIGKILL to real worker processes (TESTING-REPORT.md). If the snapshot is not on the worker that
+  picks the job up, the crawl starts over.
+* **Signed-in crawls** additionally keep the browser session (encrypted, in the database), probe the signed-in state
+  when a page answers 401/403 or bounces to the login page, and pause for reauthentication when the probe fails. Time
+  spent waiting for a person is not counted against the wall-clock limit. See AUTHENTICATED-CRAWLING.md.
 
 ## Limits (all clamped server-side)
 

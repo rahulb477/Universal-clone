@@ -1,5 +1,6 @@
-import { handleError } from "@/lib/api";
-import { ApiError, getManager } from "@/lib/crawler/manager";
+import { handleError, json, readJson } from "@/lib/api";
+import { controlJob } from "@/lib/server/jobs";
+import { requireUser } from "@/lib/server/users";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -7,13 +8,10 @@ export const dynamic = "force-dynamic";
 /** POST { action: "pause" | "resume" | "cancel" } */
 export async function POST(req: Request, ctx: { params: Promise<{ id: string }> }) {
   try {
-    const { id } = await ctx.params;
-    const body = (await req.json().catch(() => ({}))) as { action?: string };
-    const mgr = getManager();
-    if (body.action === "resume") await mgr.resume(id);
-    else if (body.action === "pause" || body.action === "cancel") mgr.control(id, body.action);
-    else throw new ApiError(400, "action must be pause, resume or cancel");
-    return Response.json({ ok: true });
+    const { user } = await requireUser(req);
+    const body = await readJson(req, 1024);
+    const r = await controlJob(user, (await ctx.params).id, body.action);
+    return json({ ok: true, ...r });
   } catch (e) {
     return handleError(e);
   }

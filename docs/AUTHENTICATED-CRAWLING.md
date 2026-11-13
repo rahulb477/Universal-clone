@@ -1,30 +1,105 @@
-# Authenticated crawling (implementation scope and operations)
+# Signed-in (authenticated) crawling
 
-Authenticated form login is an opt-in extension of the existing crawler. It is not enabled unless both server secrets below are configured. Do not deploy it on a public host without TLS and a trusted operator-controlled front end.
+Archive the pages a site shows **to an account you are authorised to use**. Nothing here bypasses an access control:
+the crawler signs in the way the account holder does, and whenever the site asks for a human (one-time code, CAPTCHA,
+SSO, consent screen) the crawl waits and the human does that step personally.
 
-## Required environment secrets
+Requires `CRAWLER_CREDENTIAL_ENCRYPTION_KEY` (32 random bytes; `openssl rand -base64 32`) on the web app **and** the
+worker. Without it the feature is off and the UI says so. Security properties are in [SECURITY.md](SECURITY.md).
 
-- `CRAWLER_AUTH_API_TOKEN`: a random, high-entropy operator bearer token, at least 32 characters. Provision it outside source control and provide it only to an authorized operator. The UI keeps it in component memory and sends it only in the `Authorization` header to authentication endpoints.
-- `CRAWLER_CREDENTIAL_ENCRYPTION_KEY`: exactly 32 random bytes encoded as 64 hex characters or base64. It encrypts each profile envelope with AES-256-GCM. Losing/changing this key prevents interrupted authenticated jobs from resuming.
-- Optional `CRAWLER_AUTH_MAX_PROFILES`: server profile cap, 1–5 (default 5). Each profile starts a separate job/archive; the manager's concurrent-job cap also applies.
+## Login profiles
 
-Example key creation (keep the output in your deployment secret manager, not in the repository):
+A crawl can carry up to five profiles (`CRAWLER_AUTH_MAX_PROFILES`). Each has a name, the login page URL and a sign-in
+method:
 
-```sh
-openssl rand -hex 32
-openssl rand -base64 32
-```
+| Method | What happens | Stored secret |
+|---|---|---|
+| **Automatic form login** | The worker fills in the username/password form and submits it. If the site then shows a verification step, the crawl waits for you (below). | Password, encrypted, until the crawl ends |
+| **Manual sign-in** | You sign in yourself in the worker's isolated browser — for SSO, passkeys, CAPTCHAs, anything a form filler cannot do. | No password at all |
 
-The UI accepts standard email/username + password forms, optional CSS selectors for the fields/button, and a required CSS selector that must be visible after a successful login. The selector provides an explicit verification condition: a successful form submission or a redirect by itself is not considered authentication success. Login POSTs are allowed only during the login phase, only to the configured login page's exact origin, only for a bounded number of top-level form submissions; all other browser mutations remain blocked. Crawled browser requests remain GET-only.
+Fields: optional CSS selectors for the username, password and submit elements (auto-detected when omitted); an
+**authenticated-state selector** — an element that is visible only when signed in, required for form logins and
+recommended for manual ones; an optional **MFA selector** that identifies the site's verification page; and optional
+**extra sign-in origins** for a manual sign-in that leaves the site (your SSO provider).
 
-Profile credentials are AES-256-GCM encrypted in a mode-0600 `auth.enc` file outside the archive. Crawl options and API responses contain no password. The profile runs in its own Chromium context and its own job directory/archive. Cookie/session state is held in memory only; on an interrupted-job resume the encrypted credentials are used to sign in again rather than restoring plaintext cookies. Credentials are removed from memory at terminal completion/cancellation/failure and encrypted credential files are removed for terminal outcomes. A paused session-expiration job retains its encrypted profile until resumed or explicitly cleared.
+A login counts as successful only when the authenticated-state selector is visible. A redirect or a 200 is not enough.
 
-The “Test Login” endpoint uses the same verified login flow but closes the context immediately and returns only a status. “Remove Login” removes that profile from the current UI; for an already-started job use “Remove Credentials / Clear Session” to cancel its active browser context and erase its encrypted credential file. A session expiration (401/403 or redirect to the configured login page) pauses that profile; “Reauthenticate & Resume” repeats the verified form login and reuses saved crawl state.
+## The manual sign-in / verification window
 
-## Explicit unsupported scope
+When a profile needs a person, the job shows “waiting for sign-in” and the page opens a panel with a live view of the
+isolated browser (JPEG frames, about one per second). Click the picture to focus a field and type, or use the text box
+for pasting; **Enter / Tab / Back / Reload** are buttons. The crawl continues by itself once the signed-in state is
+detected, or press **I have finished signing in**. **Cancel sign-in** ends the attempt.
 
-This increment does **not** implement remote/visible manual browser login, human-completed MFA/CAPTCHA, a combined-discovery archive mode, authenticated asset downloads via browser cookies, or authenticated API/XHR crawling. Automated login will fail closed if a human challenge is required; no CAPTCHA/MFA bypass is attempted. The separate archive mode is the only supported multi-profile mode, preserving isolation rather than merging account data. The regular crawler's non-authentication APIs remain unauthenticated as in the existing application; put the whole service behind a trusted network/access-control proxy. Auth-specific endpoints and authenticated crawl creation require the operator token.
+* Nothing is typed, clicked or solved for you in this window.
+* With an MFA selector configured, an automatic login submits the password and then stops at the verification page
+  without touching it. Without one, landing on an unexpected page fails the login (it does not guess).
+* The window closes after `CRAWLER_INTERACTIVE_LOGIN_MINUTES` (default 10); the crawl then fails with nothing crawled.
+* Waiting for you does not count against the crawl's time limit.
+* The picture is the only thing that leaves the worker; the browser itself is never exposed to the network.
+* If the provider opens a new tab or popup, the window follows the newest one (implemented; not covered by a test).
 
-## Controlled integration fixture
+## Sessions: reuse, expiry, reauthentication
 
-`tests/fixtures/auth-site.ts` is a local, test-owned cookie-protected website with a real POST login and protected dashboard, nested orders and settings routes. `tests/integration/authenticated-crawl.test.ts` exercises separate profile archives, session isolation, authenticated nested GET discovery, invalid credentials, and password redaction when Chromium is available. `tests/unit/auth.test.ts` covers authenticated encryption, tamper rejection, profile validation, API token checks, and password omission.
+* After a successful sign-in the browser session (cookies and web storage) is saved encrypted for that profile. A crawl
+  that is resumed — after a pause, a worker restart or a crash — restores it instead of signing in again.
+* If a restored session turns out to be invalid it is discarded and the profile signs in again (form) or asks you (manual).
+* During the crawl a 401/403 or a bounce to the login page triggers a probe of the signed-in state. Only if the probe
+  fails is the session treated as expired: the crawl pauses with “Session expired — resume to reauthenticate”, the page
+  it was on stays queued, and **Reauthenticate & Resume** continues from there.
+* Saved sessions expire after `CRAWLER_SESSION_TTL_HOURS` (default 12) and are erased, together with the password,
+  when the crawl completes, fails or is cancelled.
+
+## What gets archived
+
+* **Pages** reachable by links from the start URL inside the usual scope, rendered in the profile's browser context.
+* **Protected assets** — images, stylesheets, fonts, SVG sprites, CSS backgrounds, lazy and responsive images that the
+  server only serves to a signed-in user — are downloaded with the profile's session and rewritten to local paths.
+  Cookies are attached per request hop and only for the crawled site; a redirect to another origin goes without them.
+* **API discovery** (`apiDiscovery`, default `metadata`): the `fetch`/XHR calls the pages make are recorded in
+  `_report/api-discovery.json`.
+  * `metadata` — method, redacted URL, status, content type, size. No bodies.
+  * `archive` — additionally stores JSON responses of GET requests, with secret-looking keys and values redacted
+    (tokens, passwords, card and bank fields …; redaction is deliberately over-cautious). `apiFollowPagination` follows
+    `next` links with GET.
+  * `off` — nothing is recorded.
+  * GraphQL: only endpoints you list in `graphqlEndpoints` are queried, only with read-only queries; mutations are
+    never sent.
+* **Never requested while signed in:** anything but GET/HEAD/OPTIONS, sign-out links, and links that look destructive
+  (`delete`, `remove`, `unsubscribe`, `cancel-account`, `reset-password` …). These are listed in the report as skipped.
+
+## Several profiles
+
+| Mode | Result |
+|---|---|
+| **Separate archives** (default) | One independent crawl, ZIP and report per profile. |
+| **Combined discovery** (needs ≥ 2 profiles) | URLs found by any profile are tried with every profile. One ZIP with a folder per profile (`profiles/<name>/…`), plus `_report/combined-report.json` and `_report/access-matrix.json` / `.csv`: for each URL, who discovered it and who can open it. |
+
+Profiles stay isolated in both modes — separate browser contexts, cookies and private files. In combined mode only
+assets that were fetched **without** any session are shared between the profile folders. A profile whose sign-in fails
+contributes nothing and does not stop the others. After an interruption a combined crawl starts over (saved sessions
+are still reused).
+
+## Controls
+
+* **Test Login** (single-server mode only; a web tier without a browser answers 501) runs the same verified sign-in and
+  reports only the outcome.
+* **Remove credentials / Clear session** erases a job's stored password and session immediately and ends the crawl if
+  it is running. An interrupted crawl can then no longer be resumed.
+* **Pause / Resume / Cancel** work as for public crawls; cancelling still packages what was downloaded.
+
+## Not supported
+
+* Sites that require a client certificate, a hardware-bound device check, or a browser extension.
+* Keeping a session alive beyond the crawl, scheduled re-crawls, or sharing a saved session between crawls.
+* Archiving responses of non-GET API calls, WebSocket traffic or server-sent streams.
+* Passkey/WebAuthn prompts cannot be answered through a picture of a remote browser; use another sign-in method.
+* The remote window forwards clicks, typing, scrolling and a few navigation keys — no drag-and-drop, file upload,
+  clipboard access or multi-touch, which rules out some CAPTCHA styles.
+
+## How it was tested
+
+Against a test-owned site (`tests/fixtures/auth-site.ts`) with a real cookie session, a one-time-code step, role-based
+pages, protected assets, JSON and GraphQL APIs, and destructive endpoints that count every hit — in a real Chromium, and
+end to end through the HTTP API, the worker process and the web UI. It has **not** been run against third-party login
+providers (Google, Microsoft, Okta, Auth0 …) or real CAPTCHA services. Results: [TESTING-REPORT.md](TESTING-REPORT.md).

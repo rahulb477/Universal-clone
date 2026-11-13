@@ -1,12 +1,25 @@
 {
-  "name": "nextjs-postgresql-template",
+  "name": "universal-clone",
   "private": true,
+  "engines": {
+    "node": ">=20.12"
+  },
   "scripts": {
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
     "lint": "eslint .",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "worker": "node --import ./scripts/load-env.mjs --import tsx src/worker/main.ts",
+    "db:migrate": "node --import ./scripts/load-env.mjs --import tsx src/db/migrate.ts",
+    "user:create": "node --import ./scripts/load-env.mjs --import tsx scripts/create-user.ts",
+    "chromium:check": "node scripts/chromium-env.mjs",
+    "test": "vitest run",
+    "test:unit": "vitest run tests/unit",
+    "test:integration": "vitest run tests/integration",
+    "test:db": "vitest run tests/db",
+    "test:e2e": "vitest run tests/e2e",
+    "db:dev": "node scripts/dev-postgres.mjs"
   },
   "dependencies": {
     "archiver": "^8.0.0",
@@ -19,9 +32,13 @@
     "playwright-core": "^1.65.0",
     "pngjs": "^7.0.0",
     "react": "19.2.6",
-    "react-dom": "19.2.6"
+    "react-dom": "19.2.6",
+    "tsx": "^4.23.15"
   },
   "devDependencies": {
+    "@aws-crypto/sha256-js": "^5.2.0",
+    "@smithy/signature-v4": "^5.7.5",
+    "@sparticuz/chromium": "^153.0.0",
     "@tailwindcss/postcss": "4.1.17",
     "@types/adm-zip": "^0.5.8",
     "@types/archiver": "^8.0.0",
@@ -31,10 +48,11 @@
     "@types/react": "19.2.14",
     "@types/react-dom": "19.2.3",
     "adm-zip": "^0.6.1",
-    "drizzle-kit": "0.31.10",
+    "embedded-postgres": "^18.6.0-beta.19",
     "eslint": "9.39.4",
     "eslint-config-next": "16.4.2",
     "postcss": "8.5.23",
+    "s3rver": "^3.7.1",
     "tailwindcss": "4.1.17",
     "typescript": "5.9.3",
     "vitest": "^5.1.0"

@@ -1,6 +1,6 @@
 import crypto from "node:crypto";
 import { afterEach, describe, expect, it } from "vitest";
-import { AuthConfigurationError, assertAuthApiToken, decryptAuthProfiles, encryptAuthProfiles, profileStatus, validateAuthProfiles } from "@/lib/crawler/auth";
+import { AuthConfigurationError, decryptAuthProfiles, encryptAuthProfiles, profileStatus, validateAuthProfiles } from "@/lib/crawler/auth";
 
 afterEach(() => {
   delete process.env.CRAWLER_CREDENTIAL_ENCRYPTION_KEY;
@@ -34,14 +34,5 @@ describe("authenticated crawl credential boundary", () => {
     expect(() => validateAuthProfiles([{ ...profile(), loginUrl: "javascript:alert(1)" }])).toThrow(AuthConfigurationError);
     const { authenticatedSelector: _removed, ...missing } = profile();
     expect(() => validateAuthProfiles([missing])).toThrow("authenticated-state selector");
-  });
-
-  it("requires a high-entropy configured endpoint token and compares it in constant time", () => {
-    const token = crypto.randomBytes(32).toString("base64url");
-    process.env.CRAWLER_AUTH_API_TOKEN = token;
-    expect(() => assertAuthApiToken(new Request("https://local/api", { headers: { authorization: `Bearer ${token}` } }))).not.toThrow();
-    expect(() => assertAuthApiToken(new Request("https://local/api", { headers: { authorization: "Bearer wrong" } }))).toThrow("access denied");
-    delete process.env.CRAWLER_AUTH_API_TOKEN;
-    expect(() => assertAuthApiToken(new Request("https://local/api"))).toThrow("disabled");
   });
 });

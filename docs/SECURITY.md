@@ -17,42 +17,96 @@ The application fetches user-supplied URLs, so every layer assumes hostile input
 * **Every redirect hop** is re-validated (syntax, IP rules, scope), max 8 hops, loops detected.
 * **Browser (Chromium)**: every request goes through a route handler that applies the same hostname/IP rules (verdict cached
   per host), blocks non-http(s) schemes, disables service workers and downloads. All non-GET/HEAD/OPTIONS requests are aborted
-  except up to three form-document POSTs to the exact configured login origin during the explicit login phase. *Residual risk*:
+  except form-document POSTs during an explicit sign-in phase, and then only to the configured login origin (plus the
+  extra sign-in origins the user listed for a manual sign-in, e.g. an SSO provider). *Residual risk*:
   the browser resolves DNS itself, so rebinding is mitigated only by the per-host pre-check (see LIMITATIONS.md).
 * **Operator switch**: `CRAWLER_ALLOW_PRIVATE_NETWORKS=1` disables these rules for intranet/testing use. It is read from
-  the server environment only; there is no API parameter for it.
+  the environment of the process that runs the crawl (the worker); there is no API parameter for it. All workers on one
+  database must use the same value — a job is checked by whichever worker claims it.
 
 ## Scope & politeness
 
 Domain boundary enforced for pages (and redirects); `robots.txt` honoured by default (allow/disallow with longest match,
-wildcards, `$`, `Crawl-delay`); per-host request spacing; bounded concurrency; identifies itself as `SiteArchiverBot/2.0`.
-The UI requires an explicit statement that the user owns the site or has permission. Paywalls and access controls are never
-bypassed. The opt-in form-authentication flow described in [AUTHENTICATED-CRAWLING.md](AUTHENTICATED-CRAWLING.md) requires
-explicit operator authorization and verified login state; CAPTCHA/MFA are not bypassed.
+wildcards, `$`, `Crawl-delay`); per-host request spacing; bounded concurrency. The crawler identifies itself as
+`UniversalCloneBot/3.1` and obeys robots groups addressed to `UniversalCloneBot` or to the pre-3.1 name `SiteArchiverBot`.
+Starting a crawl requires an explicit statement that the user owns the site or has permission (enforced by the API, not
+only the UI). Paywalls, CAPTCHAs, MFA and access controls are never bypassed: when a site asks for a human, a human
+answers (see [AUTHENTICATED-CRAWLING.md](AUTHENTICATED-CRAWLING.md)).
 
-## Authenticated profile controls
+## Accounts, sessions and ownership (`src/lib/server/users.ts`, `jobs.ts`)
 
-* Only authenticated crawl creation, login testing, and credential/session clearing are protected by the operator bearer token
-  `CRAWLER_AUTH_API_TOKEN` (minimum 32 characters). Provision the token outside source control. Existing non-auth API routes
-  do not have application-level authorization; deploy behind a trusted access-control proxy.
-* Credentials are serialized only into an AES-256-GCM authenticated envelope using the deployment-only
-  `CRAWLER_CREDENTIAL_ENCRYPTION_KEY`. The encrypted file has restrictive permissions, is outside the ZIP, and is not copied
-  into crawl options or API responses. Session cookies are in-memory only. Credentials are cleared from crawler memory at
-  terminal outcomes; encrypted profiles are retained only for an interrupted/paused job that may be resumed.
-* Login browser mutation is narrowly enabled during the configured login phase, only for bounded form POSTs to the exact login
-  origin. Every other browser request remains GET/HEAD/OPTIONS. Browser GETs retain SSRF checks and page scope checks.
-* Each profile runs as a distinct crawler/job/archive/context; no profile shares cookies or page state with another. This is
-  separate-archive mode only; there is no combined archive mode. Authenticated assets fetched by the HTTP asset manager do not
-  inherit browser cookies.
-* Login selectors must include a visible authenticated-state element. A POST/redirect alone is never treated as success. 401,
-  403, or a redirect to the configured login URL pauses that profile; resume replays the configured login and verifies state.
-* Manual browser login/MFA, combined discovery, and authenticated XHR/API requests are not implemented. The feature fails closed
-  for manual-mode requests and never attempts to bypass human challenges.
+* **Every API route except `/api/health` and the sign-in/registration endpoints requires a signed-in user.** Anonymous
+  requests get `401`; `/api/auth/me` answers anonymous visitors with `{user: null}` and nothing else.
+* **Passwords**: 10–200 characters, scrypt (N=2¹⁵, r=8, p=1) with a per-user random salt, constant-time comparison. A
+  sign-in attempt for an unknown address costs the same hash computation as a real one.
+* **Sessions**: a 256-bit random token in an `HttpOnly`, `SameSite=Lax` cookie (`Secure` and `__Host-`-prefixed in
+  production). Only its SHA-256 is stored, so a database leak does not yield usable sessions. Signing out deletes the
+  row. Lifetime `AUTH_SESSION_TTL_HOURS` (default 7 days).
+* **CSRF**: every non-GET request must carry `x-csrf-token` (an HMAC of the session token, handed out by
+  `/api/auth/me`) **and** come from the same origin (`Sec-Fetch-Site` / `Origin`, or the `APP_ORIGIN` allow-list).
+* **Registration** is closed by default (`npm run user:create`). `invite` mode compares the code in constant time.
+* **Rate limits** are stored in PostgreSQL, so they hold across instances: sign-in 10 / 15 min per address and
+  100 / 15 min per client IP, registration 10 / h per IP, crawl starts `CRAWLER_STARTS_PER_MINUTE` per user, login tests
+  10 / 10 min, sign-in input events 1200 / min. The client IP comes from `X-Forwarded-For` only as far as
+  `TRUSTED_PROXY_HOPS` says it can be trusted (default: not at all).
+* **Ownership**: every job, profile, sign-in session, event and command row carries the owner, and every query filters
+  by it. Another user's job id answers `404` on every route — status, events, download, reports, control, credentials,
+  sign-in frames and input (tested route by route). Rows left over from version 3.0 have no owner and are reachable by nobody.
+* **Quotas per user**: concurrent crawls, starts per minute, stored bytes; finished crawls are deleted after
+  `CRAWL_RETENTION_HOURS`.
+
+## Separation of web tier and worker
+
+The web tier only reads and writes PostgreSQL and the archive store. It never launches a browser, never fetches a
+user-supplied URL and never decrypts a site password or session — it encrypts what the user submits and hands it to the
+queue. Only the worker (`src/worker/worker.ts`) decrypts credentials, and only while it runs that job. In `external`
+mode `POST /api/auth/test` answers `501` rather than starting a browser in the web tier.
+
+## Secrets at rest
+
+* Site passwords, saved browser sessions (cookies + storage), typed sign-in input in transit through the queue, and the
+  screenshots of the manual sign-in browser are stored only as AES-256-GCM envelopes (`v2.<iv>.<tag>.<ciphertext>`)
+  under `CRAWLER_CREDENTIAL_ENCRYPTION_KEY`. Each envelope is bound to its purpose and row (`profile:<id>`,
+  `session:<id>`, `login-frame:<id>`, `cmd:<jobId>`) as authenticated data, so a ciphertext copied onto another row
+  does not decrypt.
+* They are **erased when the crawl reaches a final state** (`completed`, `failed`, `cancelled`): `secret` and
+  `session_state` become `NULL`, `cleared_at` is set. They are kept — encrypted — only while a crawl is queued, running,
+  paused or interrupted, because resuming needs them. The owner can erase them at any time (“Remove credentials”),
+  which also ends the crawl if it is running. Sign-in screenshots are deleted when the sign-in ends.
+* Passwords never appear in API responses, logs, events, reports or the ZIP (asserted in tests against process output,
+  database rows, the archive bytes and the rendered page). The UI drops the password from its own state as soon as the
+  crawl is created.
+* Losing or changing the key makes unfinished signed-in crawls unresumable; it does not affect finished archives.
+
+## Signed-in crawling controls
+
+* One isolated Chromium context per profile; profiles never share cookies, storage or cached private responses.
+* The session cookie is attached to an asset or API request **per hop and only for the site being crawled** — a redirect
+  to another origin is followed without it.
+* While crawling, the browser may only issue GET/HEAD/OPTIONS. Sign-out links and destructive-looking GET links
+  (`/logout`, `/delete`, `/unsubscribe` …) are never followed. API discovery replays GET requests and read-only GraphQL
+  queries only; mutations are never sent.
+* A sign-in counts as successful only when the user's “authenticated-state” selector is visible — not on a redirect or a
+  200. A later 401/403 or bounce to the login page is treated as an expired session only if a fresh probe confirms it.
+* **Manual sign-in** runs in the worker's isolated browser; the owner sees JPEG frames and sends clicks/keys through the
+  API. Input events are validated (type, coordinates, key names, text length), frames are readable by the owner only,
+  form submissions are limited to the login origin plus explicitly listed sign-in origins, and the window closes after
+  `CRAWLER_INTERACTIVE_LOGIN_MINUTES`. Nothing is filled in or solved automatically during a manual sign-in.
+
+## Archive storage
+
+* `local`: files live outside the web root under a key derived from the validated job id; the download route streams
+  them after the ownership check.
+* `s3`: the bucket must be private. A download is a `302` to a pre-signed GET valid for `DOWNLOAD_URL_TTL_SECONDS`
+  (default 60 s, max 1 h), issued only after the ownership check and never cached (`no-store`). Anyone holding that URL
+  can use it until it expires — that is inherent to pre-signed links. Reports are proxied through the app instead.
+* Object keys are built from validated ids and a fixed file whitelist; keys containing `..` or `//` are rejected.
+* Each archive's SHA-256 is recorded at packaging time and returned with the job.
 
 ## Resource limits
 
 Per-file and total byte caps (enforced while streaming), page and depth caps, wall-clock limit, per-request timeouts
-(socket idle + total), global storage quota, max concurrent jobs, per-IP start rate limit, hard ceilings that clamp any
+(socket idle + total), per-user quotas (above), `CRAWLER_MAX_CONCURRENT_JOBS` per worker, hard ceilings that clamp any
 user-provided option (`sanitizeOptions`), retention cleanup (default 24 h).
 
 ## Filesystem safety
@@ -64,8 +118,26 @@ user-provided option (`sanitizeOptions`), retention cleanup (default 24 h).
 * Job IDs are 16 hex characters, validated on every route; report files are a fixed whitelist; report HTML is served with
   `Content-Security-Policy: default-src 'none'; …; sandbox`, `nosniff`, and all crawled text in it is HTML-escaped.
 
-## Not covered
+## Response headers (`src/proxy.ts`)
 
-No user authentication / authorisation on the API (deploy behind a proxy if exposed). Rate limiting is in-memory per process
-and trusts `X-Forwarded-For`. Chromium runs with `--no-sandbox` unless `CRAWLER_CHROMIUM_SANDBOX=1` (typical for containers) —
-run the service in an isolated container/VM with restricted egress for defence in depth.
+Pages: `Content-Security-Policy: frame-ancestors 'none'; base-uri 'self'; form-action 'self'; object-src 'none'` and
+`X-Frame-Options: DENY`. Everything: `X-Content-Type-Options: nosniff`, `Referrer-Policy: same-origin`, a restrictive
+`Permissions-Policy`, and HSTS in production. API routes set their own CSP where they serve crawled content.
+`APP_EMBED_ORIGINS` relaxes framing for the listed origins and switches the cookie to `SameSite=None; Secure;
+Partitioned`; leave it unset in production.
+
+## Not covered / residual risk
+
+* The page CSP does not restrict script sources (Next.js inlines bootstrap scripts; no nonce pipeline is set up). The app
+  renders crawled text through React only, and crawled HTML is never served from the app's origin outside the sandboxed
+  report route.
+* No email verification, password reset, second factor or account lockout notification for app accounts. An operator
+  resets a password by deleting the user row and creating the account again; that cascades to the user's job rows, so
+  delete the user's downloads in the UI first or their archive files stay in the store until removed by hand.
+* An admin role is stored but grants nothing yet; there is no admin UI.
+* Chromium runs with `--no-sandbox` unless `CRAWLER_CHROMIUM_SANDBOX=1`. Run workers in an isolated container/VM with
+  restricted egress (in particular: no route to cloud metadata or internal services) for defence in depth.
+* In Chromium, DNS is resolved by the browser, so DNS rebinding is mitigated by the per-host pre-check only.
+* Whoever holds `DATABASE_URL` **and** `CRAWLER_CREDENTIAL_ENCRYPTION_KEY` can read the credentials of unfinished
+  crawls. Keep the key out of the database host.
+* No independent security review or penetration test has been performed.

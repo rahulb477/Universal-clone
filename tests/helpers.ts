@@ -5,10 +5,17 @@ import AdmZip from "adm-zip";
 import { Crawler } from "@/lib/crawler/engine";
 import type { CrawlOptions, CrawlResult, LogEvent } from "@/lib/crawler/types";
 
-// Chromium needs shared libraries that are not installed system-wide in this sandbox.
-const LIBS = "/tmp/libs/root/usr/lib/x86_64-linux-gnu:/tmp/libs/root/lib/x86_64-linux-gnu";
-if (fs.existsSync("/tmp/libs/root/usr/lib/x86_64-linux-gnu") && !process.env.LD_LIBRARY_PATH?.includes("/tmp/libs")) {
-  process.env.LD_LIBRARY_PATH = LIBS + (process.env.LD_LIBRARY_PATH ? ":" + process.env.LD_LIBRARY_PATH : "");
+/**
+ * Browser tests call this instead of skipping. tests/setup/global.ts resolved Chromium (and the
+ * library path it needs) before any test file was loaded; when that failed the test fails loudly
+ * with the exact reason.
+ */
+export function requireChromium(): string {
+  const exe = process.env.CHROMIUM_PATH;
+  if (process.env.UC_CHROMIUM_ERROR || !exe || !fs.existsSync(exe)) {
+    throw new Error(`Chromium is required for this test and is not available: ${process.env.UC_CHROMIUM_ERROR || `CHROMIUM_PATH=${exe ?? "(unset)"} does not exist`}`);
+  }
+  return exe;
 }
 
 export const FAST: Partial<CrawlOptions> = { delayMs: 0, retryBaseMs: 5, retries: 3, concurrency: 4, requestTimeoutMs: 5000, maxDepth: 6, maxPages: 300 };

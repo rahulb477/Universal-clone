@@ -4,20 +4,15 @@ import path from "node:path";
 import AdmZip from "adm-zip";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { Crawler } from "@/lib/crawler/engine";
-import { Renderer } from "@/lib/crawler/renderer";
+import { requireChromium } from "../helpers";
 import type { AuthProfile } from "@/lib/crawler/auth";
 import { startAuthSite } from "../fixtures/auth-site";
 
 let site: Awaited<ReturnType<typeof startAuthSite>>;
-let browserAvailable = false;
 const workDirs: string[] = [];
 
 beforeAll(async () => {
   site = await startAuthSite();
-  const probe = await Renderer.create(true);
-  browserAvailable = !!probe;
-  await probe?.close();
-  if (!browserAvailable) console.warn("Authenticated browser integration tests skipped: Chromium unavailable", Renderer.lastError);
 });
 afterAll(async () => {
   await site?.close();
@@ -43,7 +38,7 @@ async function crawlAs(p: AuthProfile) {
 }
 
 describe("authenticated isolated crawling against a local controlled site", () => {
-  const browserIt = (title: string, test: () => Promise<void>) => it(title, async (ctx) => browserAvailable ? test() : ctx.skip());
+  const browserIt = (title: string, test: () => Promise<void>) => it(title, async () => { requireChromium(); await test(); });
 
   browserIt("logs in, verifies state, and discovers nested authenticated GET pages", async () => {
     const p = profile("alice@example.test");
@@ -81,7 +76,7 @@ describe("authenticated isolated crawling against a local controlled site", () =
     const workDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth-resume-"));
     workDirs.push(workDir);
     const crawler = new Crawler(`${site.url}/dashboard`, { renderMode: "js", useSitemap: false, respectRobots: false, concurrency: 1, maxDepth: 3, maxPages: 10, delayMs: 0, requestTimeoutMs: 10000 }, { workDir, allowPrivateNetworks: true, authProfile: profile("recover@example.test") });
-    const paused = new Promise<void>((resolve) => crawler.once("status", (status) => { if (status === "paused") resolve(); }));
+    const paused = new Promise<void>((resolve) => crawler.on("status", (status) => { if (status === "paused") resolve(); }));
     const run = crawler.run();
     await paused;
     expect(crawler.getStats().status).toBe("paused");

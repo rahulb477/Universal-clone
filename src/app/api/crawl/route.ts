@@ -1,46 +1,31 @@
-import { clientIp, handleError } from "@/lib/api";
-import { ApiError, getManager } from "@/lib/crawler/manager";
-import { AuthConfigurationError, assertAuthApiToken, encryptAuthProfiles, validateAuthProfiles } from "@/lib/crawler/auth";
+import { handleError, json, readJson } from "@/lib/api";
+import { createCrawl, listJobs } from "@/lib/server/jobs";
+import { requireUser } from "@/lib/server/users";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-/** GET /api/crawl — download history. */
-export async function GET() {
+/** GET /api/crawl — the signed-in user's download history. */
+export async function GET(req: Request) {
   try {
-    return Response.json({ jobs: await getManager().list() });
+    const { user } = await requireUser(req);
+    return json({ jobs: await listJobs(user) });
   } catch (e) {
     return handleError(e);
   }
 }
 
-/** POST /api/crawl — start a crawl. Body: { url, options?, confirmPermission: true } */
+/**
+ * POST /api/crawl — queue a crawl.
+ * Body: { url, options?, confirmPermission: true, authProfiles?, authMode?: "separate" | "combined" }
+ * The owner is always the signed-in user; profile ids are generated server-side.
+ */
 export async function POST(req: Request) {
   try {
-    let body: { url?: unknown; options?: unknown; confirmPermission?: unknown; authProfiles?: unknown };
-    try {
-      body = await req.json();
-    } catch {
-      throw new ApiError(400, "Invalid JSON body");
-    }
-    if (body.confirmPermission !== true) {
-      throw new ApiError(400, "You must confirm that you own the website or have permission to archive it.");
-    }
-    if (body.authProfiles !== undefined) {
-      assertAuthApiToken(req);
-      const profiles = validateAuthProfiles(body.authProfiles);
-      // Fail closed before creating any jobs when the encryption key is absent or invalid.
-      encryptAuthProfiles(profiles);
-      await getManager().assertBatchCapacity(profiles.length);
-      getManager().reserveAuthBatchStart(clientIp(req));
-      const ids: string[] = [];
-      for (const profile of profiles) ids.push(await getManager().start(body.url, body.options, clientIp(req), profile));
-      return Response.json({ id: ids[0], ids, mode: "separate" }, { status: 201 });
-    }
-    const id = await getManager().start(body.url, body.options, clientIp(req));
-    return Response.json({ id, ids: [id] }, { status: 201 });
+    const { user } = await requireUser(req);
+    const result = await createCrawl(user, await readJson(req));
+    return json(result, { status: 201 });
   } catch (e) {
-    if (e instanceof AuthConfigurationError) return Response.json({ error: e.message }, { status: e.status });
     return handleError(e);
   }
 }

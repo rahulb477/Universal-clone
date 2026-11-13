@@ -2,21 +2,18 @@ import { pathToFileURL } from "node:url";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { Renderer } from "@/lib/crawler/renderer";
-import { cleanup, has, read, runCrawl, type Run } from "../helpers";
+import { cleanup, has, read, requireChromium, runCrawl, type Run } from "../helpers";
 import { startExternal, startFixture, type Fixture } from "../fixtures/site";
 
 let fx: Fixture;
 let ext: Awaited<ReturnType<typeof startExternal>>;
 let renderer: Renderer | null = null;
 const runs: Run[] = [];
-let chromiumOk = false;
 
 beforeAll(async () => {
   ext = await startExternal();
   fx = await startFixture(ext.url);
   renderer = await Renderer.create(true);
-  chromiumOk = !!renderer;
-  if (!chromiumOk) console.warn("Chromium unavailable, browser tests will be skipped:", Renderer.lastError);
 });
 afterAll(async () => {
   await renderer?.close();
@@ -25,7 +22,11 @@ afterAll(async () => {
   await ext?.close();
 });
 
-const t = (name: string, fn: () => Promise<void>) => it(name, async (ctx) => (chromiumOk ? fn() : ctx.skip()));
+const t = (name: string, fn: () => Promise<void>) => it(name, async () => {
+    requireChromium();
+    if (!renderer) throw new Error(`Chromium failed to launch: ${Renderer.lastError}`);
+    await fn();
+  });
 
 describe("JavaScript rendering", () => {
   t("6. fast mode misses JS-generated links; JS mode finds them", async () => {

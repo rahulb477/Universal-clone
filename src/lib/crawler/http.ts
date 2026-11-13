@@ -4,7 +4,7 @@ import zlib from "node:zlib";
 import type { IncomingMessage } from "node:http";
 import { checkUrlSyntax, createGuardedLookup, SsrfError } from "./security";
 
-export const USER_AGENT = "SiteArchiverBot/2.0 (+authorized-offline-archiver)";
+export const USER_AGENT = "UniversalCloneBot/3.1 (+authorized-offline-archiver)";
 
 export type HttpErrorKind =
   | "timeout"
@@ -48,6 +48,12 @@ export interface HttpOptions {
   validateRedirect?: (url: URL) => void | Promise<void>;
   /** Called with the response headers before any body is read; throw to refuse. */
   onHeaders?: (status: number, headers: http.IncomingHttpHeaders, url: URL) => void;
+  /**
+   * Extra request headers computed separately for every hop (initial URL and each redirect target).
+   * Used to attach an authenticated profile's cookies: the callback decides per URL, so session
+   * cookies are never forwarded to a redirect target they do not belong to.
+   */
+  headersFor?: (url: URL) => Promise<Record<string, string>> | Record<string, string>;
 }
 
 const SSL_CODES = new Set([
@@ -183,7 +189,8 @@ export async function httpGet(rawUrl: string, opts: HttpOptions = {}): Promise<H
     seen.add(url.href);
     let out: { res: IncomingMessage; body: Buffer };
     try {
-      out = await request(url, o);
+      const hopHeaders = opts.headersFor ? await opts.headersFor(url) : undefined;
+      out = await request(url, hopHeaders ? { ...o, headers: { ...o.headers, ...hopHeaders } } : o);
     } catch (e) {
       throw classify(e);
     }

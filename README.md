@@ -38,7 +38,7 @@ why it stopped at limited pages, and an honest account of what was ported versus
 
 ```bash
 npm ci                                             # installs the committed lockfile
-npm run chromium:install                           # or set CHROMIUM_PATH to an installed Chromium/Chrome
+npm run chromium:install                           # verifies the bundled headless Chromium
 cp .env.example .env                               # set DATABASE_URL and CRAWLER_CREDENTIAL_ENCRYPTION_KEY
 npm run db:migrate                                 # creates / upgrades the schema
 npm run user:create -- you@example.com             # accounts are operator-created by default; asks for a password
@@ -137,7 +137,7 @@ See [docs/TESTING-REPORT.md](docs/TESTING-REPORT.md) for what is covered and the
   `AUTH_COOKIE_SECURE=0` for local testing only).
 * **Crawl shows "interrupted"** – its worker stopped. Press *Resume*; finished pages are not fetched again.
 * **"JavaScript rendering was requested but Chromium could not be launched"** – run
-  `npx playwright-core install --with-deps chromium`, or set `CHROMIUM_PATH`.
+  `npm run chromium:install` and check its full launch diagnostic; see the deployment guide.
 * **"This address is not allowed"** – the target resolves to a private/loopback/metadata address. This is intentional.
 * **Few pages found** – check the report's *Skipped URLs* table (robots.txt, depth, page limit, patterns, traps) and
   try JavaScript rendering for client-rendered sites.

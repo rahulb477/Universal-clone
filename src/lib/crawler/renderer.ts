@@ -106,6 +106,8 @@ const GENERIC_LOGIN_FAILURE = "Login failed or authenticated-state verification 
 
 export class Renderer {
   static lastError = "";
+  // Full Playwright launch log for operator diagnostics only, not API responses.
+  static lastLaunchDiagnostic = "";
   private authContext: BrowserContext | null = null;
   private navigationGuards = new WeakMap<BrowserContext, (url: string) => boolean>();
   private policies = new WeakMap<BrowserContext, ContextPolicy>();
@@ -123,6 +125,7 @@ export class Renderer {
    */
   static async create(allowPrivate: boolean, opts: { headed?: boolean } = {}): Promise<Renderer | null> {
     try {
+      if (!process.env.CHROMIUM_PATH) throw new Error("Chromium is not configured; initialise the worker browser first.");
       const { chromium } = await import("playwright-core");
       const args = ["--disable-dev-shm-usage", "--disable-gpu"];
       if (process.env.CRAWLER_CHROMIUM_SANDBOX !== "1") args.push("--no-sandbox");
@@ -131,9 +134,12 @@ export class Renderer {
         args,
         executablePath: process.env.CHROMIUM_PATH || undefined,
       });
+      Renderer.lastError = "";
+      Renderer.lastLaunchDiagnostic = "";
       return new Renderer(browser, allowPrivate, new Gate(3), true);
     } catch (e) {
-      Renderer.lastError = (e as Error).message.split("\n")[0];
+      Renderer.lastLaunchDiagnostic = e instanceof Error ? (e.stack || e.message) : String(e);
+      Renderer.lastError = (e instanceof Error ? e.message : String(e)).split("\n")[0];
       return null;
     }
   }

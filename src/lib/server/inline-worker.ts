@@ -1,3 +1,4 @@
+import path from "node:path";
 import { workerMode } from "./config";
 
 const g = globalThis as typeof globalThis & { __ucInlineWorker?: Promise<unknown> };
@@ -10,6 +11,12 @@ export function ensureInlineWorker(): void {
   if (workerMode() !== "inline" || g.__ucInlineWorker) return;
   g.__ucInlineWorker = (async () => {
     try {
+      // The inline worker needs the same packaged browser as the standalone worker.
+      // External web processes must not extract or launch a browser.
+      const helper = path.join(process.cwd(), "scripts", "chromium-env.mjs");
+      const { applyChromiumEnv } = (await import(/* webpackIgnore: true */ helper)) as { applyChromiumEnv: () => Promise<{ ok: boolean; reason?: string }> };
+      const browser = await applyChromiumEnv();
+      if (!browser.ok) console.warn(`[worker] inline Chromium is unavailable (${browser.reason}); browser-dependent crawls may fail.`);
       const { CrawlWorker } = await import("@/worker/worker");
       const worker = new CrawlWorker({ id: process.env.WORKER_ID || undefined, info: { inline: true, node: process.version } });
       await worker.start();

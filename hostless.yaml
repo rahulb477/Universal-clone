@@ -5,7 +5,7 @@
 # for that resource; a Hostless App built from this repository needs its own settings in
 # **Settings > General** (see docs/DEPLOYMENT.md).
 #
-# Build: install exactly the committed lockfile, then pre-install Chromium. No Next.js build is
+# Build: install production dependencies from the lockfile, then verify Chromium. No Next.js build is
 # needed — the worker runs TypeScript through `tsx`.
 #
 # Runtime: one replica per `CRAWL_DATA_DIR`. Several replicas are safe because every job is claimed
@@ -15,7 +15,7 @@
 # scripts/ (it does: this is the repository root).
 build:
   system: auto
-  command: "npm ci --no-audit --no-fund && npm run chromium:install"
+  command: "npm ci --omit=dev --no-audit --no-fund && npm run chromium:install"
 
 # `npm run worker` is `node --import ./scripts/load-env.mjs --import tsx src/worker/main.ts`.
 # Do not wrap it in a shell or a fork: the supervisor's SIGTERM must reach this exact process so it

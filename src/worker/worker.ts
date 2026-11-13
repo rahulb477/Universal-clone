@@ -6,6 +6,8 @@ import { and, asc, eq, inArray, isNull, lt, notInArray, or, sql } from "drizzle-
 import { db } from "@/db";
 import { authProfiles, crawlJobs, jobCommands, jobEvents, loginSessions, workers, type CrawlJobRow } from "@/db/schema";
 import { decryptSecret, encryptSecret, type AuthProfile } from "@/lib/crawler/auth";
+import { openSavedSessionForWorker, invalidateSavedSession, touchSavedSession } from "@/lib/server/login-profiles";
+import { LoginBrowserManager } from "./login-browser-manager";
 import { redactUrl } from "@/lib/crawler/api-discovery";
 import { CombinedCrawler } from "@/lib/crawler/combined";
 import { Crawler, type AuthHooks, type CrawlRunner } from "@/lib/crawler/engine";
@@ -65,12 +67,15 @@ export class CrawlWorker {
   private pollMs: number;
   private log: (msg: string) => void;
   private settled: Promise<void>[] = [];
+  /** "Login with Browser" windows of reusable profiles (independent of any crawl job). */
+  private loginBrowser: LoginBrowserManager;
 
   constructor(private o: WorkerOptions = {}) {
     this.id = o.id || `${os.hostname()}-${process.pid}-${crypto.randomBytes(3).toString("hex")}`;
     this.maxJobs = o.maxJobs ?? limits.maxConcurrentJobs;
     this.pollMs = o.pollMs ?? 500;
     this.log = o.log ?? ((m) => console.log(`[worker ${this.id}] ${m}`));
+    this.loginBrowser = new LoginBrowserManager({ log: (m) => this.log(m) });
   }
 
   get activeJobs() {
@@ -86,6 +91,9 @@ export class CrawlWorker {
       .onConflictDoUpdate({ target: workers.id, set: { startedAt: new Date(), heartbeatAt: new Date(), info: this.o.info ?? {} } });
     await this.recover();
     this.timers.push(setInterval(() => void this.tick(), this.pollMs));
+    // A touch slower than the job loop: fetching the sign-in window's queue on its own connection
+    // must never delay claiming a queued crawl.
+    this.timers.push(setInterval(() => void this.loginBrowser.tick(), 750));
     this.timers.push(setInterval(() => void this.flush(), 400));
     this.timers.push(setInterval(() => void this.heartbeat(), HEARTBEAT_MS));
     this.timers.push(setInterval(() => void this.janitor().catch((e) => this.log(`janitor: ${(e as Error).message}`)), 60000));
@@ -101,6 +109,7 @@ export class CrawlWorker {
     for (const job of this.live.values()) job.runner.suspend();
     await Promise.race([Promise.allSettled(this.settled), new Promise((r) => setTimeout(r, 20000))]);
     await this.flush();
+    await this.loginBrowser.stop().catch(() => {});
     await db.delete(workers).where(eq(workers.id, this.id)).catch(() => {});
     this.log("stopped");
   }
@@ -209,9 +218,33 @@ export class CrawlWorker {
       .where(and(eq(authProfiles.jobId, jobId), isNull(authProfiles.clearedAt)));
   }
 
-  private hooks(job: () => LiveJob | undefined, jobId: string, profileId: string): AuthHooks {
+  private hooks(job: () => LiveJob | undefined, jobId: string, profileId: string, savedProfileId?: string | null): AuthHooks {
     const ctx = `session:${profileId}`;
     return {
+      /**
+       * A reusable "Login with Browser" session that the owner attached to this crawl. It is
+       * decrypted here only, used by the engine before anything else, and dropped as soon as the
+       * site rejects it (the job then falls back to the profile's own login settings).
+       */
+      loadSavedProfile: savedProfileId
+        ? async () => {
+            const owner = job()?.ownerId;
+            if (!owner) return null;
+            const saved = await openSavedSessionForWorker(savedProfileId, owner).catch(() => null);
+            if (!saved) return null;
+            await touchSavedSession(savedProfileId).catch(() => {});
+            return { state: saved.state, profileName: saved.profileName };
+          }
+        : undefined,
+      onSavedProfileRejected: savedProfileId
+        ? async (reason) => {
+            await invalidateSavedSession(savedProfileId, reason === "expired" ? "expired" : "rejected").catch(() => {});
+            job()?.pending.push({
+              type: "log",
+              data: { t: Date.now(), tag: "WARN", message: "The site rejected the saved login profile; it needs to be renewed with “Sign in again”. Signing in with this crawl's own settings." } satisfies LogEvent,
+            });
+          }
+        : undefined,
       loadSession: async () => {
         const row = (await db.select({ s: authProfiles.sessionState, exp: authProfiles.sessionExpiresAt }).from(authProfiles).where(eq(authProfiles.id, profileId)).limit(1))[0];
         if (!row?.s || !row.exp || row.exp.getTime() < Date.now()) return null;
@@ -274,7 +307,7 @@ export class CrawlWorker {
         runner = new CombinedCrawler(row.url, opts, { ...common, profiles, hooksFor: (p) => this.hooks(getJob, id, p.id) });
       } else {
         const profile = profiles[0];
-        runner = new Crawler(row.url, opts, { ...common, resume, authProfile: profile, authHooks: profile ? this.hooks(getJob, id, profile.id) : undefined });
+        runner = new Crawler(row.url, opts, { ...common, resume, authProfile: profile, authHooks: profile ? this.hooks(getJob, id, profile.id, profileRows[0]?.savedProfileId) : undefined });
       }
       const job: LiveJob = { id, ownerId: row.ownerId, runner, pending: [], stats: null, statsDirty: false, profileStatus: new Map(), logins: new Map(), credentialsCleared: false };
       this.live.set(id, job);

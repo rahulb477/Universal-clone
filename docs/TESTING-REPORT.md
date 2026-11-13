@@ -35,13 +35,22 @@ are therefore unverified. `scripts/chromium-env.mjs` picks the browser (operator
 `npx vitest run` (all files, one after another):
 
 ```
-Test Files  15 passed | 1 skipped (16)       (the skipped file is the opt-in live test)
-     Tests  250 passed | 2 skipped (252)     duration 731 s
+Test Files  18 passed | 1 skipped (19)       (the skipped file is the opt-in live test)
+     Tests  299 passed | 2 skipped (301)
 ```
+
+Per suite, in the run of this build: `tests/unit` + `tests/db` **142 passed** (7 files, 50 s), `tests/integration`
+**84 passed** (5 files, 232 s), `tests/e2e` **73 passed** (6 files, 517 s). `npm run typecheck`, `npm run lint` and
+`npm run build` are clean. Timings are from this sandbox (2 vCPU); a slower machine would take longer.
 
 The 30 tests added for the one-time first-administrator setup (V3.1.1) are included above: 8 in
 `tests/unit/setup.test.ts`, 19 in `tests/e2e/setup-admin.test.ts`, 1 in `tests/db/migrations.test.ts` and the
 updated migration ledger expectations in `tests/e2e/api.test.ts`.
+
+The 49 tests for reusable “Login with Browser” profiles (this release) are included: 23 in
+`tests/unit/saved-login.test.ts`, 18 in `tests/integration/saved-login-profiles.test.ts` and 8 in
+`tests/e2e/saved-login-ui.test.ts`. `tests/e2e/ui.test.ts` also gained the new sign-in step and
+`tests/db/migrations.test.ts` the new migration.
 
 This is one clean run made after the last code change. Two earlier full runs in the same pass each had one failing
 test, both timing-related and both since fixed in the product (the sign-in panel requested a frame just after the
@@ -55,15 +64,18 @@ machine would not be surprising; that has not been measured.
 | `tests/unit/url.test.ts` | 29 | normalisation, query rules, traps, local path mapping, collision registry, scope, patterns, option clamping |
 | `tests/unit/parser.test.ts` | 14 | srcset, CSS/JS reference extraction, HTML extraction + rewriting, charsets, robots.txt (current and pre-3.1 bot name), sitemaps |
 | `tests/unit/auth.test.ts` | 3 | credential envelopes (tamper rejection), safe profile projection, unsafe login URLs |
+| `tests/unit/saved-login.test.ts` | 23 | saved-login rules: address normalisation, host scoping (exact host+port, parent domain always, sub-domain only with the flag, never a suffix/substring match), AES-256-GCM envelopes bound to profile+owner+host, request-capture parsing and cookie-header redaction, input validation, and the browser-side host matcher the panel uses |
 | `tests/db/migrations.test.ts` | 14 | migrations on a real PostgreSQL (below), including the `admin_setup` marker |
 | `tests/integration/crawl.test.ts` | 32 | full public crawls of a local multi-feature site (scenario table below) |
 | `tests/integration/storage.test.ts` | 15 | local and S3 archive stores (below) |
 | `tests/integration/authenticated-crawl.test.ts` | 4 | form login, separate archives per profile, isolation, wrong password, redaction, mid-crawl reauthentication |
 | `tests/integration/authenticated-v31.test.ts` | 15 | protected assets, API/GraphQL discovery, manual sign-in, MFA, session reuse/expiry, combined discovery |
+| `tests/integration/saved-login-profiles.test.ts` | 18 | reusable logins against real PostgreSQL + real Chromium + a real `CrawlWorker`: metadata-only creation, same-site rule, ownership 404s, cookie scoping, encrypted-at-rest, “Login with Browser” (real isolated browser, hand sign-in, refusal before signing in, JPEG frames, abandoned window), attaching to a crawl (per-crawl profile, no second login, authenticated ZIP), no-worker honesty, request-capture import, housekeeping |
 | `tests/e2e/browser.test.ts` | 9 | JS rendering, SPA, lazy loading, full-mode interaction, render guard, offline click-through, visual comparison |
 | `tests/e2e/api.test.ts` | 21 | the production server over HTTP + SSE: accounts, CSRF, ownership, crawls, signed-in crawls |
 | `tests/e2e/worker.test.ts` | 9 | web tier and worker as separate processes: queue, object storage, shutdown, crash, restart, retention |
-| `tests/e2e/ui.test.ts` | 7 | the web UI driven in a real browser, plus the embedding headers |
+| `tests/e2e/ui.test.ts` | 7 | the web UI driven in a real browser (per-crawl login form, MFA panel, ZIP), plus the embedding headers |
+| `tests/e2e/saved-login-ui.test.ts` | 8 | the whole saved-login workflow in the production build driven in a browser: address → “Login with Browser” → real isolated browser → hand sign-in → “Use This Login” → “Login profile saved” → attached to the crawl → authenticated ZIP; refusal before signing in; no session material in the page or the database; site scoping (foreign profile disabled **and** refused by the API with no job created); 390 px Android layout with no horizontal overflow and ≥ 40 px touch targets; forgetting a login; deleting a profile |
 | `tests/unit/setup.test.ts` | 8 | `ADMIN_SETUP_KEY` rules (missing, short, low-entropy, placeholder, timing-safe match), administrator password policy, setup status vocabulary |
 | `tests/e2e/setup-admin.test.ts` | 19 | one-time first-administrator setup against the production server: disabled without a usable key, wrong key, invalid email, weak password, mismatched confirmation, cross-origin/cross-site/form posts, rate limits, creation, scrypt storage, `409` afterwards, advisory-lock race, sign-in, admin-only route, ordinary accounts unaffected, key never logged, and the page in an Android viewport |
 | `tests/live/live.test.ts` | 2 skipped | opt-in (`LIVE=1`), needs internet; **not run in this pass** |
@@ -90,6 +102,30 @@ requirement checklist end to end:
 | 13 | Existing authentication unaffected | pass — an ordinary account signs in and uses `/api/crawl` exactly as before; the whole existing suite is unchanged and green |
 | 14 | Production build passes | pass — `next build`, `tsc --noEmit`, `eslint .` clean |
 | 15 | No secrets in bundles or logs | pass — `ADMIN_SETUP_KEY`, `scrypt`, `timingSafeEqual` and `pg_advisory` appear in **no** `.next/static` file; server output contains neither the key nor the password |
+
+## Reusable “Login with Browser” profiles
+
+| # | Requirement | Where | Result |
+|---|---|---|---|
+| 1 | URL validation before anything starts | `tests/e2e/saved-login-ui.test.ts`, unit `normalizeAddress` | pass — empty, `ftp:`, `file:`, credentials in the URL, non-addresses are refused with a message; the field is `aria-invalid` with a described error |
+| 2 | The real site opens in an isolated browser | integration + e2e | pass — the worker launches its own Chromium context, the panel shows a real JPEG of the fixture's `/login`, the page address is shown origin+path only |
+| 3 | Manual, multi-page login | integration (keyboard only), e2e (Tab/type/Tab/type/Enter) | pass — nothing is pre-filled; the site receives exactly one `POST /login`, from the user's own keystrokes |
+| 4 | “Use This Login” validates before saving | integration + e2e | pass — refused while still on the form (“The browser is still on the login page”); accepted once the dashboard is up |
+| 5 | Profile saved and reported | integration + e2e | pass — “Login profile saved”, status `active`, one session row, `v2.` envelope |
+| 6 | Selecting a profile for a crawl | e2e | pass — checkbox attaches it; the crawl starts with `attachedProfiles: ["Member account"]` |
+| 7 | Crawl uses the authenticated context | integration + e2e | pass — “Restored the saved login profile”, `dashboard/index.html` in the ZIP contains `Account member@example.test`, no second sign-in |
+| 8 | Profile ↔ domain binding | unit + integration + e2e | pass — foreign site: checkbox disabled, “Not for this address”, API answers 400 and creates no job; a subdomain needs `matchSubdomains`; a different port is a different site |
+| 9 | Session expiry and re-login | integration | pass — `invalidateSavedSession` → `session-expired` + “sign in again”; anonymised session → `session-rejected`; the profile row is never deleted |
+| 10 | Unauthorized access rejected | integration | pass — another owner gets an identical 404 from every operation (read, rename, attach, clear, delete, open a window) |
+| 11 | Session isolation between users | integration + e2e | pass — foreign cookies are dropped on capture; the sealed envelope is bound to owner+profile+host, so moving the row makes it undecryptable |
+| 12 | No secrets in logs, responses or pages | integration + e2e | pass — neither the password nor the username appears in `target_login_profiles`, `login_sessions`, `login_profile_commands`, the rendered page, the server output or the ZIP; cookie values never leave the server |
+| 13 | Worker-offline honesty | integration | pass — job stays `queued`, `workerOnline: false`, the profile keeps its session and status, the UI offers a recovery message |
+| 14 | Mobile layout | e2e (390×844, `isMobile`) | pass — `scrollWidth <= clientWidth`, primary buttons ≥ 40 px tall, screenshot attached to the run |
+| 15 | Existing login and crawler behaviour | full suites | pass — 142 unit+db, 84 integration and 73 e2e tests green, including the per-crawl form login, MFA panel, ownership, quotas and the worker/crash tests |
+
+Two product fixes came out of this work and are covered above: the sign-in window used to show nothing when
+“Use This Login” was refused (the message is now polled and displayed), and the panel compared hostnames without the
+port, so a login saved for one local site was offered for another on a different port.
 
 ## What the new suites establish
 

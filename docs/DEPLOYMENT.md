@@ -189,6 +189,21 @@ only for throw-away preview environments.
 4. Old job directories under `CRAWL_DATA_DIR` are not migrated; delete them.
 5. `drizzle-kit push` is no longer part of the workflow (the dev dependency and `drizzle.config.json` were removed).
 
+## Upgrading to 3.1 (saved logins)
+
+1. Deploy the new code, run `npm run db:migrate` — on a fresh database it applies four files
+   (`0000_initial.sql`, `0001_users_ownership_queue.sql`, `0002_admin_setup.sql`, `0003_saved_login_profiles.sql`);
+   an existing 3.0 database only gets `0003`. It only **adds** tables and indexes
+   (`target_login_profiles`, `saved_login_sessions`, `login_profile_commands`) and never rewrites existing rows.
+2. `CRAWLER_CREDENTIAL_ENCRYPTION_KEY` must be identical on the web app and the worker; saved sessions are sealed with
+   it (AES-256-GCM, bound to profile + owner + site). Rotating it makes existing saved logins unreadable — they show as
+   `session-expired` and users sign in again; nothing else breaks.
+3. Optional tuning: `CRAWLER_LOGIN_BROWSER_MINUTES`, `CRAWLER_SAVED_SESSION_TTL_HOURS`,
+   `CRAWLER_MAX_SAVED_PROFILES`.
+4. The worker needs no new network exposure: all traffic still goes through PostgreSQL. A web tier on Vercel keeps
+   working in `CRAWLER_WORKER_MODE=external`, and the “Login with Browser” button opens windows on whichever worker is
+   heart-beating.
+
 ## Local development
 
 ```bash

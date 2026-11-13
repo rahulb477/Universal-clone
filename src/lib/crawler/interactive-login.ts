@@ -108,6 +108,17 @@ export class InteractiveLogin {
         if (open.length) this.page = open[open.length - 1];
       });
     });
+    if (o.profile.authenticatedSelector) {
+      // Detect a selector that cannot be parsed: that is a configuration error, not a slow sign-in.
+      void this.run(async () => {
+        try {
+          await o.page.locator(o.profile.authenticatedSelector!).first().count();
+        } catch (e) {
+          const message = (e as Error).message.split("\n")[0];
+          if (/not a valid selector|Unexpected token|is not a valid/i.test(message)) this.invalidSelector = message.slice(0, 200);
+        }
+      });
+    }
     this.poll = setInterval(() => void this.check(), 700);
     this.poll.unref?.();
     this.expiry = setTimeout(() => void this.end("expired", "The sign-in window timed out before authentication was completed."), o.timeoutMs);
@@ -190,12 +201,21 @@ export class InteractiveLogin {
       if (p.isClosed()) continue;
       try {
         if (await p.locator(sel).first().isVisible({ timeout: 250 })) return true;
-      } catch {
-        /* navigation in progress or invalid selector */
+      } catch (e) {
+        // A selector that does not parse can never become visible: tell the user instead of waiting.
+        const message = (e as Error).message.split("\n")[0];
+        if (/not a valid selector|Unexpected token|is not a valid/i.test(message)) {
+          this.invalidSelector = message.slice(0, 200);
+          return false;
+        }
+        /* navigation in progress */
       }
     }
     return false;
   }
+
+  /** Set when the configured authenticated-state selector cannot be parsed (surfaced to the user). */
+  invalidSelector?: string;
 
   /** Automatic detection: the configured authenticated-state element is visible. */
   async check(): Promise<boolean> {
@@ -217,6 +237,9 @@ export class InteractiveLogin {
   async confirm(): Promise<{ ok: boolean; message?: string }> {
     if (this.status === "authenticated") return { ok: true };
     if (this.status !== "awaiting-user") return { ok: false, message: "This sign-in session is no longer active." };
+    if (this.o.profile.authenticatedSelector && this.invalidSelector) {
+      return { ok: false, message: `The authenticated-state selector configured for this login cannot be parsed (${this.invalidSelector}). Sign in and press “Use This Login” after correcting it.` };
+    }
     if (this.o.profile.authenticatedSelector) {
       if (await this.check()) return { ok: true };
       return { ok: false, message: "The authenticated-state element is not visible yet. Finish signing in first." };

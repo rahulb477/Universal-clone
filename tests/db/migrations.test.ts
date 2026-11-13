@@ -42,19 +42,19 @@ describe("migrations", () => {
   it("creates the complete schema on an empty database and is idempotent", async () => {
     const url = await fresh();
     const first = await migrate(url);
-    expect(first.applied).toEqual(["0000_initial.sql", "0001_users_ownership_queue.sql", "0002_admin_setup.sql"]);
-    expect(await tables(url)).toEqual(["admin_setup", "auth_profiles", "crawl_jobs", "job_commands", "job_events", "login_sessions", "rate_events", "schema_migrations", "user_sessions", "users", "workers"]);
+    expect(first.applied).toEqual(["0000_initial.sql", "0001_users_ownership_queue.sql", "0002_admin_setup.sql", "0003_saved_login_profiles.sql"]);
+    expect(await tables(url)).toEqual(["admin_setup", "auth_profiles", "crawl_jobs", "job_commands", "job_events", "login_profile_commands", "login_sessions", "rate_events", "saved_login_sessions", "schema_migrations", "target_login_profiles", "user_sessions", "users", "workers"]);
     const second = await migrate(url);
     expect(second.applied).toEqual([]);
-    expect(second.skipped).toEqual(["0000_initial.sql", "0001_users_ownership_queue.sql", "0002_admin_setup.sql"]);
-    expect((await pg.query("select name from schema_migrations order by 1", [], url)).map((r: any) => r.name)).toEqual(["0000_initial.sql", "0001_users_ownership_queue.sql", "0002_admin_setup.sql"]);
+    expect(second.skipped).toEqual(["0000_initial.sql", "0001_users_ownership_queue.sql", "0002_admin_setup.sql", "0003_saved_login_profiles.sql"]);
+    expect((await pg.query("select name from schema_migrations order by 1", [], url)).map((r: any) => r.name)).toEqual(["0000_initial.sql", "0001_users_ownership_queue.sql", "0002_admin_setup.sql", "0003_saved_login_profiles.sql"]);
   });
 
   it("the migrated database has exactly the columns the application's schema declares", async () => {
     const url = await fresh();
     await migrate(url);
     const declared = (Object.values(schema) as unknown[]).filter((v) => is(v, PgTable)) as PgTable[];
-    expect(declared.length).toBe(10);
+    expect(declared.length).toBe(13);
     for (const table of declared) {
       const name = getTableName(table);
       const inDb = await pg.query<{ column_name: string; is_nullable: string }>("select column_name, is_nullable from information_schema.columns where table_schema = 'public' and table_name = $1", [name], url);
@@ -69,7 +69,7 @@ describe("migrations", () => {
     await pg.query(V30_SCHEMA, [], url);
     await pg.query(`insert into crawl_jobs (id, url, status, options, has_zip, zip_bytes) values ('0123456789abcdef', 'https://old.example/', 'completed', '{"maxPages":10}'::jsonb, true, 1234)`, [], url);
     const r = await migrate(url);
-    expect(r.applied).toEqual(["0000_initial.sql", "0001_users_ownership_queue.sql", "0002_admin_setup.sql"]);
+    expect(r.applied).toEqual(["0000_initial.sql", "0001_users_ownership_queue.sql", "0002_admin_setup.sql", "0003_saved_login_profiles.sql"]);
     const row = (await pg.query<any>("select * from crawl_jobs", [], url))[0];
     expect(row).toMatchObject({ id: "0123456789abcdef", url: "https://old.example/", status: "completed", has_zip: true, owner_id: null, mode: "public", resume: false, download_count: 0, storage: null });
     expect(row.options).toEqual({ maxPages: 10 });
@@ -79,8 +79,8 @@ describe("migrations", () => {
   it("two deploys migrating at the same time do not collide", async () => {
     const url = await fresh();
     const results = await Promise.all([migrate(url), migrate(url), migrate(url)]);
-    expect(results.flatMap((r) => r.applied).sort()).toEqual(["0000_initial.sql", "0001_users_ownership_queue.sql", "0002_admin_setup.sql"]);
-    expect(await pg.query("select count(*)::int as n from schema_migrations", [], url)).toEqual([{ n: 3 }]);
+    expect(results.flatMap((r) => r.applied).sort()).toEqual(["0000_initial.sql", "0001_users_ownership_queue.sql", "0002_admin_setup.sql", "0003_saved_login_profiles.sql"]);
+    expect(await pg.query("select count(*)::int as n from schema_migrations", [], url)).toEqual([{ n: 4 }]);
   });
 
   it("the first-administrator marker survives deletion of the account and is unique", async () => {
@@ -101,10 +101,11 @@ describe("migrations", () => {
       fs.writeFileSync(path.join(dir, "0002_broken.sql"), "CREATE TABLE half_done (id text PRIMARY KEY);\nALTER TABLE does_not_exist ADD COLUMN x text;\n");
       await expect(migrate(url, dir)).rejects.toThrow(/Migration 0002_broken\.sql failed: .*does_not_exist/);
       expect(await tables(url)).not.toContain("half_done");
+      // 0002_broken sorts after 0002_admin_setup, so that one is applied and 0003 is never reached.
       expect((await pg.query<any>("select name from schema_migrations order by 1", [], url)).map((r) => r.name)).toEqual(["0000_initial.sql", "0001_users_ownership_queue.sql", "0002_admin_setup.sql"]);
       // Fixing the file and re-running applies just that one.
       fs.writeFileSync(path.join(dir, "0002_broken.sql"), "CREATE TABLE half_done (id text PRIMARY KEY);\n");
-      expect((await migrate(url, dir)).applied).toEqual(["0002_broken.sql"]);
+      expect((await migrate(url, dir)).applied).toEqual(["0002_broken.sql", "0003_saved_login_profiles.sql"]);
       expect(await tables(url)).toContain("half_done");
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
@@ -116,8 +117,8 @@ describe("migrations", () => {
     expect(runCli("src/db/migrate.ts", [], { DATABASE_URL: "" }).code).toBe(1);
     const a = runCli("src/db/migrate.ts", [], { DATABASE_URL: url });
     expect(a.code).toBe(0);
-    expect(a.out).toContain("migrations applied: 0000_initial.sql, 0001_users_ownership_queue.sql, 0002_admin_setup.sql; already present: 0");
-    expect(runCli("src/db/migrate.ts", [], { DATABASE_URL: url }).out).toContain("migrations applied: none; already present: 3");
+    expect(a.out).toContain("migrations applied: 0000_initial.sql, 0001_users_ownership_queue.sql, 0002_admin_setup.sql, 0003_saved_login_profiles.sql; already present: 0");
+    expect(runCli("src/db/migrate.ts", [], { DATABASE_URL: url }).out).toContain("migrations applied: none; already present: 4");
     const unreachable = runCli("src/db/migrate.ts", [], { DATABASE_URL: "postgres://postgres:x@127.0.0.1:9/nope" });
     expect(unreachable.code).toBe(1);
 

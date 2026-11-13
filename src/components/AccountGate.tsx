@@ -4,7 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import { api, setCsrf } from "@/lib/client";
 import Downloader from "./Downloader";
 
-export type Features = { authenticatedCrawling: boolean; workerMode: string; workerOnline: boolean };
+export type Features = { authenticatedCrawling: boolean; savedLogins?: boolean; workerMode: string; workerOnline: boolean };
 type Me = { user: { email: string; role: string } | null; registration: "open" | "invite" | "closed"; features?: Features };
 
 /** Shows the sign-in form until a session exists; the downloader is never rendered for anonymous visitors. */
@@ -74,36 +74,36 @@ export default function AccountGate() {
   if (!me) return <div className="flex min-h-screen items-center justify-center bg-slate-900 text-slate-300">Loading…</div>;
   if (me.user) return <Downloader userEmail={me.user.email} features={me.features ?? { authenticatedCrawling: false, workerMode: "inline", workerOnline: false }} onSignOut={signOut} />;
 
-  const input = "w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-200";
+  const input = "w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-sm focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/40";
   return (
     <div className="flex min-h-screen items-center justify-center bg-gradient-to-b from-slate-900 to-slate-700 px-4">
-      <form onSubmit={submit} className="w-full max-w-sm space-y-4 rounded-2xl bg-white p-6 shadow-xl">
+      <form onSubmit={submit} className="w-full max-w-sm space-y-4 rounded-2xl bg-slate-900 p-6 shadow-xl">
         <div>
-          <h1 className="text-xl font-bold text-slate-900">Universal Clone</h1>
-          <p className="mt-1 text-sm text-slate-600">{mode === "login" ? "Sign in to start and manage your downloads." : "Create an account."}</p>
+          <h1 className="text-xl font-bold text-slate-50">Universal Clone</h1>
+          <p className="mt-1 text-sm text-slate-400">{mode === "login" ? "Sign in to start and manage your downloads." : "Create an account."}</p>
         </div>
         <div>
-          <label className="mb-1 block text-xs font-medium text-slate-600" htmlFor="acc-email">Email</label>
+          <label className="mb-1 block text-xs font-medium text-slate-400" htmlFor="acc-email">Email</label>
           <input id="acc-email" className={input} type="email" autoComplete="username" required value={email} onChange={(e) => setEmail(e.target.value)} />
         </div>
         <div>
-          <label className="mb-1 block text-xs font-medium text-slate-600" htmlFor="acc-password">Password</label>
+          <label className="mb-1 block text-xs font-medium text-slate-400" htmlFor="acc-password">Password</label>
           <input id="acc-password" className={input} type="password" autoComplete={mode === "login" ? "current-password" : "new-password"} required minLength={mode === "register" ? 10 : 1} value={password} onChange={(e) => setPassword(e.target.value)} />
           {mode === "register" && <p className="mt-1 text-xs text-slate-500">At least 10 characters.</p>}
         </div>
         {mode === "register" && me.registration === "invite" && (
           <div>
-            <label className="mb-1 block text-xs font-medium text-slate-600" htmlFor="acc-invite">Invite code</label>
+            <label className="mb-1 block text-xs font-medium text-slate-400" htmlFor="acc-invite">Invite code</label>
             <input id="acc-invite" className={input} type="password" autoComplete="off" required value={invite} onChange={(e) => setInvite(e.target.value)} />
           </div>
         )}
-        {error && <p role="alert" className="rounded-lg bg-rose-50 px-3 py-2 text-sm text-rose-700">{error}</p>}
-        {notice && <p className="rounded-lg bg-emerald-50 px-3 py-2 text-sm text-emerald-700">{notice}</p>}
+        {error && <p role="alert" className="rounded-lg bg-rose-500/10 px-3 py-2 text-sm text-rose-300">{error}</p>}
+        {notice && <p className="rounded-lg bg-emerald-500/10 px-3 py-2 text-sm text-emerald-300">{notice}</p>}
         <button type="submit" disabled={busy} className="w-full rounded-lg bg-indigo-600 px-4 py-2 font-semibold text-white hover:bg-indigo-700 disabled:opacity-50">
           {busy ? "Please wait…" : mode === "login" ? "Sign in" : "Create account"}
         </button>
         {me.registration !== "closed" ? (
-          <button type="button" className="w-full text-sm text-indigo-700 hover:underline" onClick={() => { setMode(mode === "login" ? "register" : "login"); setError(""); }}>
+          <button type="button" className="w-full text-sm text-indigo-300 hover:underline" onClick={() => { setMode(mode === "login" ? "register" : "login"); setError(""); }}>
             {mode === "login" ? "Create an account" : "I already have an account"}
           </button>
         ) : (

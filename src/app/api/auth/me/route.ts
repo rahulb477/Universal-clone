@@ -17,7 +17,13 @@ export async function GET(req: Request) {
       user: { email: ctx.user.email, role: ctx.user.role },
       csrfToken: ctx.csrfToken,
       registration: registrationMode(),
-      features: { authenticatedCrawling: authenticatedCrawlingEnabled(), workerMode: workerMode(), workerOnline: await workerOnline() },
+      features: {
+        authenticatedCrawling: authenticatedCrawlingEnabled(),
+        // Reusable "Login with Browser" profiles use the same at-rest encryption key.
+        savedLogins: authenticatedCrawlingEnabled(),
+        workerMode: workerMode(),
+        workerOnline: await workerOnline(),
+      },
     });
   } catch (e) {
     return handleError(e);

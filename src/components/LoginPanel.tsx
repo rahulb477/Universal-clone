@@ -102,20 +102,20 @@ export default function LoginPanel({ jobId, session, profileName }: { jobId: str
     }
   }
 
-  const btn = "rounded border border-slate-300 bg-white px-3 py-1.5 text-sm hover:bg-slate-50";
+  const btn = "rounded border border-slate-700 bg-slate-900 px-3 py-1.5 text-sm hover:bg-slate-800/50";
   return (
-    <section className="rounded-2xl border-2 border-amber-300 bg-amber-50 p-4 shadow" aria-label="Manual sign-in">
+    <section className="rounded-2xl border-2 border-amber-500/50 bg-amber-500/10 p-4 shadow" aria-label="Manual sign-in">
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <h2 className="font-semibold text-amber-900">
+        <h2 className="font-semibold text-amber-200">
           {session.reason === "mfa" ? "Verification step required" : session.reason === "reauthentication" ? "Sign in again" : "Sign in"} — {profileName}
         </h2>
-        <span className="text-xs text-amber-800">Window closes in {left || "…"}</span>
+        <span className="text-xs text-amber-200">Window closes in {left || "…"}</span>
       </div>
-      <p className="mt-1 text-sm text-amber-900">
+      <p className="mt-1 text-sm text-amber-200">
         This is an isolated browser running on the crawl worker. Sign in yourself, including any one-time code or CAPTCHA the site asks for — nothing is solved or bypassed for you. The crawl continues automatically once the signed-in state is detected.
       </p>
-      {session.pageUrl && <p className="mt-2 truncate rounded bg-white px-2 py-1 font-mono text-xs text-slate-600 ring-1 ring-amber-200">{session.pageUrl}</p>}
-      <div className="mt-2 overflow-hidden rounded-lg bg-slate-200 ring-1 ring-slate-300">
+      {session.pageUrl && <p className="mt-2 truncate rounded bg-slate-900 px-2 py-1 font-mono text-xs text-slate-400 ring-1 ring-amber-500/40">{session.pageUrl}</p>}
+      <div className="mt-2 overflow-hidden rounded-lg bg-slate-800 ring-1 ring-slate-700">
         {src ? (
           // eslint-disable-next-line @next/next/no-img-element
           <img src={src} alt="Remote sign-in browser. Click to interact, then type." tabIndex={0} onClick={click} onKeyDown={key} onWheel={(e) => void send({ action: "input", event: { type: "scroll", dy: Math.max(-2000, Math.min(2000, e.deltaY)) } })} className="block w-full cursor-crosshair outline-none focus:ring-2 focus:ring-indigo-400" style={{ aspectRatio: `${VIEW.width} / ${VIEW.height}` }} draggable={false} />
@@ -131,7 +131,7 @@ export default function LoginPanel({ jobId, session, profileName }: { jobId: str
           setText("");
         }}
       >
-        <input className="min-w-0 flex-1 rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-sm" type="password" autoComplete="off" value={text} onChange={(e) => setText(e.target.value)} placeholder="Type or paste text for the focused field, then press Send" aria-label="Text to send to the focused field" />
+        <input className="min-w-0 flex-1 rounded-lg border border-slate-700 bg-slate-900 px-3 py-1.5 text-sm" type="password" autoComplete="off" value={text} onChange={(e) => setText(e.target.value)} placeholder="Type or paste text for the focused field, then press Send" aria-label="Text to send to the focused field" />
         <button type="submit" className={btn}>Send text</button>
         <button type="button" className={btn} onClick={() => void send({ action: "input", event: { type: "key", key: "Enter" } })}>Enter</button>
         <button type="button" className={btn} onClick={() => void send({ action: "input", event: { type: "key", key: "Tab" } })}>Tab</button>
@@ -140,8 +140,8 @@ export default function LoginPanel({ jobId, session, profileName }: { jobId: str
       </form>
       <div className="mt-3 flex flex-wrap items-center gap-2">
         <button type="button" className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-700" onClick={() => void send({ action: "confirm" })}>I have finished signing in</button>
-        <button type="button" className="rounded-lg border border-rose-300 bg-white px-4 py-2 text-sm text-rose-700 hover:bg-rose-50" onClick={() => void send({ action: "cancel" })}>Cancel sign-in</button>
-        {(note || session.message) && <span role="status" className="text-sm text-amber-900">{note || session.message}</span>}
+        <button type="button" className="rounded-lg border border-rose-300 bg-slate-900 px-4 py-2 text-sm text-rose-300 hover:bg-rose-500/10" onClick={() => void send({ action: "cancel" })}>Cancel sign-in</button>
+        {(note || session.message) && <span role="status" className="text-sm text-amber-200">{note || session.message}</span>}
       </div>
     </section>
   );

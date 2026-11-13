@@ -53,6 +53,23 @@ its only measured results so far are on a tiny local fixture page (0.000 % diffe
 * With local storage the web app and the worker must share a directory; on separate machines use S3-compatible storage.
 * Socket.IO from the original project was replaced by Server-Sent Events (one-way is sufficient; control uses POST).
 
+## Saved logins ("Login with Browser")
+* A saved login is a **cookie/storage snapshot**, not a live browser. Sites that rotate a token on every request, bind a
+  session to a device/TLS fingerprint, or keep server-side state tied to an IP can reject it. Some accept it only from
+  the same network as the worker.
+* The window is a picture with about one frame per second: no drag-and-drop, file upload, clipboard, multi-touch or
+  WebAuthn/passkey prompts. Some CAPTCHA styles are therefore not answerable, and a one-time code has to be typed.
+* A window closes after `CRAWLER_LOGIN_BROWSER_MINUTES` (15 by default) and after 90 s with no activity; a slow
+  federated sign-in can run out of time, which costs one retry.
+* One profile is one site: a login used across several related hostnames needs `matchSubdomains` and a consistent
+  cookie domain — a session cookie set for `auth.example.com` and used on `app.example.com` only works if the site
+  itself set it for `.example.com`.
+* Reusing a saved login keeps it alive only as long as the site allows. Nothing refreshes a token proactively, and there
+  is no scheduled re-crawl: when the site rejects it the profile shows "session rejected" and you sign in again.
+* Profiles are per account. There is no sharing, no team scope and no admin view of another user's saved logins.
+* The import-a-request fallback accepts cookies copied from a browser; a site that needs more than cookies (a signed
+  header, a device certificate) is out of scope.
+
 ## Accounts
 * Email + password only. No email verification, password reset, second factor, single sign-on or admin screen; an
   operator creates accounts on the command line (or enables invite/open registration).

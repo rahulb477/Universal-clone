@@ -33,6 +33,13 @@
   against the disk root, and are listed in `assets-manifest.json` / "missing assets" in the report.
 * **Rendered snapshots** (`js` mode) drop `<script>` tags (the DOM is already built); `full` mode keeps and downloads them.
 
+## Assets behind a login
+
+In a signed-in crawl the asset fetcher asks the profile's browser context for the cookies of each URL **per redirect
+hop** and sends them only to the crawled site; a hop to another origin is requested without them. Assets that were
+fetched without any session can be shared between the profile folders of a combined crawl (`public-assets.ts`); assets
+fetched with a session never are.
+
 ## Not rewritten
 
 JavaScript files are never modified: runtime-built URLs (`"/img/" + name + ".png"`) cannot be rewritten and may still point to

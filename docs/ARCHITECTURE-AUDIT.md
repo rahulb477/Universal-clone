@@ -71,7 +71,8 @@ patching the Express files in place. Be explicit about the mapping:
 | `wget -mkEpnp` | Own crawler engine (`src/lib/crawler`) | `wget` is **not used** any more: it cannot satisfy discovery, JS rendering, SSRF and query requirements. |
 | `archiver` ZIP | `archiver` 8 (same library, upgraded) | Streamed entry by entry |
 | Download folder per job | `CRAWL_DATA_DIR/<id>` | Same idea |
-| In-memory only | PostgreSQL `crawl_jobs` history table | Needed for history and interrupted-job detection |
+| In-memory only | PostgreSQL: accounts, job queue, events, encrypted login profiles | Since 3.1 the database is also the queue between the web tier and the worker processes |
+| No accounts | Email + password accounts; every job has one owner | Added in 3.1 |
 
 ## 5. Implementation plan (executed)
 
@@ -80,6 +81,7 @@ patching the Express files in place. Be explicit about the mapping:
 3. Parsing (`parser.ts`, `robots.ts`): HTML/CSS/srcset/JS extraction and *shared* rewriting table.
 4. Engine (`engine.ts`) + asset manager (`assets.ts`) + renderer (`renderer.ts`).
 5. Rewrite phase, reports, ZIP, visual comparison.
-6. Job manager, API, UI.
+6. Job manager, API, UI. (3.1 replaced the in-process job manager with a PostgreSQL queue and separate worker
+   processes, and added accounts, signed-in crawling and object storage — see ARCHITECTURE.md and DEPLOYMENT.md.)
 7. Tests against local fixture sites + real browser; fix what they uncover (several real bugs were found this way, see
    TESTING-REPORT.md); documentation.

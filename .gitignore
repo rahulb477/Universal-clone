@@ -4,3 +4,8 @@ node_modules/
 next-env.d.ts
 tsconfig.tsbuildinfo
 package-lock.json
+.test-artifacts/
+.pgdata/
+.env
+.env.*
+!.env.example

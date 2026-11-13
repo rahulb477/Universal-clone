@@ -1,21 +1,31 @@
-import { AuthConfigurationError, assertAuthApiToken } from "@/lib/crawler/auth";
-import { ApiError, getManager } from "@/lib/crawler/manager";
-import { handleError } from "@/lib/api";
+import { handleError, json } from "@/lib/api";
+import { clearCredentials, loginSessionsOf, ownedJob, profilesOf } from "@/lib/server/jobs";
+import { requireUser } from "@/lib/server/users";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-/** POST with the provisioned auth token removes encrypted credentials and cancels the live session. */
-export async function POST(req: Request, ctx: { params: Promise<{ id: string }> }) {
+type Ctx = { params: Promise<{ id: string }> };
+
+/** GET — login profiles of this job (never credentials) and its sign-in sessions. */
+export async function GET(req: Request, ctx: Ctx) {
   try {
-    assertAuthApiToken(req);
-    const { id } = await ctx.params;
-    const job = await getManager().get(id);
-    if (!job) throw new ApiError(404, "Job not found");
-    await getManager().clearCredentials(id);
-    return Response.json({ ok: true, credentialsRemoved: true, activeSessionCancelled: job.live });
-  } catch (error) {
-    if (error instanceof AuthConfigurationError) return Response.json({ error: error.message }, { status: error.status });
-    return handleError(error);
+    const { user } = await requireUser(req);
+    const job = await ownedJob(user, (await ctx.params).id);
+    return json({ profiles: await profilesOf(user, job.id), loginSessions: await loginSessionsOf(user, job.id) });
+  } catch (e) {
+    return handleError(e);
   }
 }
+
+/** POST / DELETE — remove stored credentials and saved browser sessions, and end the live session. */
+async function clear(req: Request, ctx: Ctx) {
+  try {
+    const { user } = await requireUser(req);
+    return json(await clearCredentials(user, (await ctx.params).id));
+  } catch (e) {
+    return handleError(e);
+  }
+}
+export const POST = clear;
+export const DELETE = clear;

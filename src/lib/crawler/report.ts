@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import type { AssetRecord } from "./assets";
+import type { ApiRecord } from "./api-discovery";
 import type { CrawlOptions, CrawlStats, FailureRecord } from "./types";
 import type { VisualRow } from "./visual";
 
@@ -50,6 +51,10 @@ export interface ReportData {
     notes: string[];
   };
   contentBytes: number;
+  /** Controlled fetch/XHR discovery results. */
+  api?: { mode: string; graphqlEndpoints: string[]; followPagination: boolean; records: ApiRecord[] };
+  /** Present for authenticated crawls. Contains no credential material. */
+  authentication?: { profileId: string; profileName: string; status: string };
   visual?: VisualRow[];
   visualNote?: string;
 }
@@ -87,6 +92,15 @@ export function buildSummary(d: ReportData) {
       contentBytes: d.contentBytes,
     },
     unsupportedDynamicFunctionality: d.unsupported,
+    authentication: d.authentication ?? null,
+    apiDiscovery: {
+      mode: d.api?.mode ?? "off",
+      endpoints: d.api?.records.length ?? 0,
+      archivedResponses: d.api?.records.filter((r) => r.archived).length ?? 0,
+      blockedStateChangingRequests: d.api?.records.filter((r) => r.blocked).length ?? 0,
+      paginationFollowUps: d.api?.records.filter((r) => r.type === "pagination").length ?? 0,
+      graphqlEndpointsAuthorised: d.api?.graphqlEndpoints ?? [],
+    },
     missingAssets: missingAssets.map((a) => ({ url: a.url, error: a.error, referrer: a.referrers[0] })),
     visualComparison: d.visual ? { rows: d.visual.length, note: d.visualNote } : { note: d.visualNote ?? "not requested" },
   };
@@ -116,8 +130,23 @@ export async function writeReports(dir: string, d: ReportData): Promise<void> {
         duplicateOf: a.duplicateOf ?? null,
         error: a.error ?? null,
         external: a.external,
+        fetchedWith: a.fetchedWith ?? null,
         referrers: a.referrers,
       })),
+      null,
+      2,
+    ),
+  );
+  await w(
+    "api-discovery.json",
+    JSON.stringify(
+      {
+        mode: d.api?.mode ?? "off",
+        note: "Only requests issued by the crawled pages themselves are listed. Request headers, cookies and tokens are never recorded; state-changing requests are blocked, not replayed; stored JSON bodies are redacted.",
+        graphqlEndpointsAuthorised: d.api?.graphqlEndpoints ?? [],
+        followPagination: d.api?.followPagination ?? false,
+        endpoints: d.api?.records ?? [],
+      },
       null,
       2,
     ),
@@ -166,7 +195,16 @@ table{border-collapse:collapse;width:100%;font-size:13px}td,th{border:1px solid 
 <h2>Skipped URLs (${d.skipped.length})</h2>${rows(d.skipped.slice(0, 500).map((x) => [esc(x.url), esc(x.reason)]), ["URL", "Reason"])}
 <h2>Unsupported dynamic functionality</h2><ul>${d.unsupported.notes.map((n) => `<li>${esc(n)}</li>`).join("")}</ul>
 ${d.unsupported.forms.length ? `<p>${d.unsupported.forms.length} form(s) were found; forms are not submitted and will not work offline.</p>` : ""}
-${d.unsupported.apiCalls.length ? `<p>XHR/fetch endpoints observed during rendering (not archived):</p><ul>${d.unsupported.apiCalls.slice(0, 50).map((u) => `<li>${esc(u)}</li>`).join("")}</ul>` : ""}
+${
+    d.api?.records.length
+      ? `<h2>API / XHR discovery (${esc(d.api.mode)})</h2><p>Requests issued by the crawled pages. State-changing requests are blocked and never replayed; stored bodies are redacted (see api-discovery.json).</p>${rows(
+          d.api.records.slice(0, 300).map((r) => [esc(r.method), esc(r.url), esc(r.blocked ? "blocked" : String(r.status)), esc(r.kind + (r.graphql ? ` (${r.graphql.operationType})` : "")), esc(r.archived ? (r.localPath ?? "yes") : (r.notArchived ?? "no"))]),
+          ["Method", "Endpoint", "HTTP", "Kind", "Archived"],
+        )}`
+      : d.unsupported.apiCalls.length
+        ? `<p>XHR/fetch endpoints observed during rendering (not archived):</p><ul>${d.unsupported.apiCalls.slice(0, 50).map((u) => `<li>${esc(u)}</li>`).join("")}</ul>`
+        : ""
+  }
 <h2>Visual comparison</h2>${visual}
 <p class="warn">Fidelity is only claimed where measured above. Pages that depend on server-side logic, authentication, third-party widgets or live APIs cannot be fully reproduced offline.</p>
 </body></html>`;

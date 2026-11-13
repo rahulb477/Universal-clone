@@ -33,7 +33,25 @@ export interface CrawlOptions {
   maxDurationMs: number;
   visualCompare: boolean;
   visualMaxPages: number;
+  /**
+   * Controlled discovery of fetch/XHR resources observed while rendering (needs a browser render mode
+   * or an authenticated profile). "metadata" records endpoint metadata only, "archive" additionally
+   * stores redacted JSON bodies of GET responses that the page itself requested.
+   */
+  apiDiscovery: ApiDiscoveryMode;
+  apiMaxResponses: number;
+  apiMaxResponseBytes: number;
+  /** Follow `next` links of observed JSON endpoints with GET requests (bounded by apiMaxPaginationPages). */
+  apiFollowPagination: boolean;
+  apiMaxPaginationPages: number;
+  /**
+   * Explicitly authorised GraphQL endpoints (same-site paths or absolute URLs). Only for these
+   * endpoints page-initiated POST requests are let through, and only when every operation is a query.
+   */
+  graphqlEndpoints: string[];
 }
+
+export type ApiDiscoveryMode = "off" | "metadata" | "archive";
 
 export const DEFAULT_STRIP_PARAMS = [
   "utm_source",
@@ -96,6 +114,12 @@ export const DEFAULT_OPTIONS: CrawlOptions = {
   maxDurationMs: 30 * 60 * 1000,
   visualCompare: false,
   visualMaxPages: 3,
+  apiDiscovery: "metadata",
+  apiMaxResponses: 200,
+  apiMaxResponseBytes: MB,
+  apiFollowPagination: false,
+  apiMaxPaginationPages: 5,
+  graphqlEndpoints: [],
 };
 
 /** Hard ceilings. User supplied values are always clamped to these. */
@@ -110,6 +134,10 @@ export const HARD_LIMITS = {
   retries: 6,
   patterns: 50,
   visualMaxPages: 10,
+  apiMaxResponses: 2000,
+  apiMaxResponseBytes: 10 * MB,
+  apiMaxPaginationPages: 50,
+  graphqlEndpoints: 5,
 };
 
 function num(v: unknown, def: number, min: number, max: number): number {
@@ -162,10 +190,17 @@ export function sanitizeOptions(input: unknown): CrawlOptions {
     maxDurationMs: Math.floor(num(i.maxDurationMs, d.maxDurationMs, 1000, HARD_LIMITS.maxDurationMs)),
     visualCompare: bool(i.visualCompare, d.visualCompare),
     visualMaxPages: Math.floor(num(i.visualMaxPages, d.visualMaxPages, 1, HARD_LIMITS.visualMaxPages)),
+    apiDiscovery: i.apiDiscovery === "off" || i.apiDiscovery === "metadata" || i.apiDiscovery === "archive" ? i.apiDiscovery : d.apiDiscovery,
+    apiMaxResponses: Math.floor(num(i.apiMaxResponses, d.apiMaxResponses, 1, HARD_LIMITS.apiMaxResponses)),
+    apiMaxResponseBytes: Math.floor(num(i.apiMaxResponseBytes, d.apiMaxResponseBytes, 1024, HARD_LIMITS.apiMaxResponseBytes)),
+    apiFollowPagination: bool(i.apiFollowPagination, d.apiFollowPagination),
+    apiMaxPaginationPages: Math.floor(num(i.apiMaxPaginationPages, d.apiMaxPaginationPages, 1, HARD_LIMITS.apiMaxPaginationPages)),
+    // Only syntactically plain endpoints are accepted; scope is enforced again when requests are matched.
+    graphqlEndpoints: strList(i.graphqlEndpoints, d.graphqlEndpoints, HARD_LIMITS.graphqlEndpoints).filter((e) => /^(\/|https?:\/\/)[^\s?#]*$/i.test(e)),
   };
 }
 
-export type CrawlStatus = "idle" | "running" | "paused" | "completed" | "cancelled" | "failed" | "interrupted";
+export type CrawlStatus = "idle" | "queued" | "running" | "paused" | "completed" | "cancelled" | "failed" | "interrupted";
 
 /** UI/API states for a credential profile. The status never contains credential material. */
 export type AuthenticationStatus =
@@ -181,10 +216,14 @@ export type AuthenticationStatus =
 
 export interface AuthProfileProgress {
   profileId: string;
+  /** Display name chosen by the owner. Never contains credential material. */
+  name?: string;
   status: AuthenticationStatus;
   pagesDiscovered: number;
   pagesDownloaded: number;
   jobId?: string;
+  /** Set while this profile waits for the user in an interactive (manual / MFA) login session. */
+  loginSessionId?: string;
 }
 
 export interface CrawlStats {
@@ -208,6 +247,10 @@ export interface CrawlStats {
   elapsedMs: number;
   status: CrawlStatus;
   stopReason?: string;
+  /** Number of fetch/XHR endpoints recorded by API discovery. */
+  apiEndpoints?: number;
+  /** Per-profile progress for authenticated crawls (one entry in separate mode, several in combined mode). */
+  profiles?: AuthProfileProgress[];
 }
 
 export type LogTag =
@@ -220,7 +263,9 @@ export type LogTag =
   | "RETRY"
   | "FAILED"
   | "WARN"
-  | "DUP";
+  | "DUP"
+  | "API"
+  | "AUTH";
 
 export interface LogEvent {
   t: number;
@@ -241,6 +286,9 @@ export interface CrawlResult {
   status: CrawlStatus;
   error?: string;
   zipPath?: string;
+  zipEntries?: number;
   reportDir?: string;
+  /** Rewritten site tree left on disk (only with internal packaging "tree"). */
+  siteDir?: string;
   stats: CrawlStats;
 }

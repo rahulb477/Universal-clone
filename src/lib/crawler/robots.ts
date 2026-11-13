@@ -19,7 +19,8 @@ export class Robots {
   sitemaps: string[] = [];
   crawlDelayMs = 0;
 
-  static parse(text: string, uaToken = "sitearchiverbot"): Robots {
+  /** Rules addressed to either product token apply: the current one and the name releases before 3.1 used. */
+  static parse(text: string, uaToken = "universalclonebot sitearchiverbot"): Robots {
     const r = new Robots();
     type Group = { agents: string[]; rules: Rule[]; delay: number };
     const groups: Group[] = [];

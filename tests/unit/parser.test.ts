@@ -129,6 +129,10 @@ describe("robots.txt and sitemaps", () => {
     expect(robots.sitemaps).toEqual(["https://a.com/sm.xml"]);
   });
   it("prefers a group that names our bot", () => {
+    const current = Robots.parse("User-agent: *\nDisallow:\n\nUser-agent: UniversalCloneBot\nDisallow: /x\n");
+    expect(current.allowed("/x")).toBe(false);
+    expect(current.allowed("/y")).toBe(true);
+    // Sites that wrote rules for the pre-3.1 name keep being obeyed.
     const r = Robots.parse("User-agent: *\nDisallow:\n\nUser-agent: SiteArchiverBot\nDisallow: /x\n");
     expect(r.allowed("/x")).toBe(false);
     expect(r.allowed("/y")).toBe(true);

@@ -132,14 +132,28 @@ function resolveRef(v: string, base: string): string | null {
 type Visitor = (abs: string, kind: RefKind) => string | null;
 
 function walk($: CheerioAPI, base: string, visit: Visitor, rewriteMode: boolean, cssVisit: (css: string) => string) {
-  const apply = (el: Parameters<CheerioAPI>[0], attr: string, kind: RefKind) => {
+  const apply = (el: Parameters<CheerioAPI>[0], attr: string, kind: RefKind, keepFragment = false) => {
     const v = $(el).attr(attr);
     if (!v) return;
-    const abs = resolveRef(v, base);
+    let abs = resolveRef(v, base);
     if (!abs) return;
+    // SVG references address an element inside the file ("sprite.svg#icon"): fetch the file, keep the fragment.
+    let fragment = "";
+    if (keepFragment) {
+      const i = abs.indexOf("#");
+      if (i >= 0) {
+        fragment = abs.slice(i);
+        abs = abs.slice(0, i);
+      }
+    }
     const r = visit(abs, kind);
-    if (r != null && rewriteMode) $(el).attr(attr, r);
+    if (r != null && rewriteMode) $(el).attr(attr, r + fragment);
   };
+  // Inline SVG: <image> and <use> pointing at external files (href and the legacy xlink:href).
+  for (const attr of ["href", "xlink:href"]) {
+    const escaped = attr.replace(":", "\\:");
+    $(`svg image[${escaped}], svg use[${escaped}]`).each((_, el) => apply(el, attr, "asset", true));
+  }
   for (const t of TARGETS) {
     $(t.sel).each((_, el) => {
       if (!t.srcset) return apply(el, t.attr, t.kind);

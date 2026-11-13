@@ -1,127 +1,233 @@
 # Testing report
 
-All results below were produced by actually running the suites in the development sandbox (Node 22, Chromium headless shell
-158, PostgreSQL local). Nothing here is aspirational. Re-run with `npx vitest run` (needs `npm run build` for the API suite).
+Everything below was produced by running the suites in the development sandbox (Debian 12, Node 22.22). Nothing is
+aspirational; what could not be run or was not covered is listed under **Not tested** at the end.
+
+## Environment actually used
+
+| Component | What ran | Note |
+|---|---|---|
+| Browser | **Chromium 153.0.8010.0** from the npm package `@sparticuz/chromium` | Not the build `playwright-core` 1.65 expects (see below) |
+| Database | **PostgreSQL 18.6**, a real server started from the npm package `embedded-postgres` | One fresh cluster per test file |
+| Object storage | `s3rver` 3.7.1 (S3 API on localhost) behind a signature-verifying gate | No AWS, R2 or MinIO endpoint was contacted |
+| Web app | the production build (`next build`, then `next start`) | Not `next dev` |
+| Worker | `node --import ./scripts/load-env.mjs --import tsx src/worker/main.ts` — the `npm run worker` command — as separate OS processes | |
+
+**Playwright's own Chromium could not be installed.** `npx playwright-core install chromium` failed with:
+
+```
+Error: Client network socket disconnected before secure TLS connection was established
+  code: 'ECONNRESET', host: 'cdn.playwright.dev', port: 443
+Failed to install browsers
+Error: Failed to download Chrome for Testing 158.0.8127.18 (playwright chromium v1254), caused by
+Error: Download failure, code=1
+```
+
+The sandbox only reaches the npm registry and GitHub, so the browser tests ran on the Chromium build that the npm
+registry can deliver. It is a real Chromium (not a mock), but **five major versions older** than the one this
+Playwright release is built against, and it is launched with `--no-sandbox`. Results on Playwright's own Chromium 158
+are therefore unverified. `scripts/chromium-env.mjs` picks the browser (operator path → Playwright's → npm package);
+`npm run chromium:check` prints which one is in use.
 
 ## Result of the last full run
 
+`npm run typecheck` — clean. `npm run lint` — clean, no warnings. `npm run build` — compiled successfully.
+`npx vitest run` (all files, one after another):
+
 ```
-Test Files  6 passed | 1 skipped (7)         (the skipped file is the opt-in live test)
-     Tests  141 passed | 2 skipped (143)     duration 146 s
+Test Files  13 passed | 1 skipped (14)       (the skipped file is the opt-in live test)
+     Tests  222 passed | 2 skipped (224)     duration 535 s
 ```
 
-| Suite | Tests | Scope |
+This is one clean run made after the last code change. Two earlier full runs in the same pass each had one failing
+test, both timing-related and both since fixed in the product (the sign-in panel requested a frame just after the
+sign-in ended; the sign-in session's page address was published a moment after the session itself). The suites are
+timing-sensitive by nature — real browsers, real processes, real signals — so an occasional flaky run on a slower
+machine would not be surprising; that has not been measured.
+
+| Suite | Tests | What it exercises |
 |---|---|---|
 | `tests/unit/security.test.ts` | 51 | SSRF IP/host/scheme tables, redirect-hop validation, redirect loops, streaming size cap, path traversal |
 | `tests/unit/url.test.ts` | 29 | normalisation, query rules, traps, local path mapping, collision registry, scope, patterns, option clamping |
-| `tests/unit/parser.test.ts` | 14 | srcset, CSS/JS reference extraction, HTML extraction + rewriting, charsets, robots.txt, sitemaps, image comparison maths |
-| `tests/integration/crawl.test.ts` | 32 | full crawls of a local multi-feature site (see mapping below) |
-| `tests/e2e/browser.test.ts` | 9 | real Chromium: JS rendering, SPA, lazy loading, full-mode interaction, render guard, offline click-through, visual comparison |
-| `tests/e2e/api.test.ts` | 6 | the **production server** (`next start`) over HTTP + SSE: start, live events, ZIP, reports, history, pause/resume/cancel, SSRF refusal |
-| `tests/live/live.test.ts` | 2 (opt-in) | `LIVE=1`: crawl of `quotes.toscrape.com` (real DNS + HTTP). Last run: **2 passed** — 53 pages stored, 7 redirect/duplicate aliases, 5 assets, 6 genuine 404 font files reported as missing |
+| `tests/unit/parser.test.ts` | 14 | srcset, CSS/JS reference extraction, HTML extraction + rewriting, charsets, robots.txt (current and pre-3.1 bot name), sitemaps |
+| `tests/unit/auth.test.ts` | 3 | credential envelopes (tamper rejection), safe profile projection, unsafe login URLs |
+| `tests/db/migrations.test.ts` | 13 | migrations on a real PostgreSQL (below) |
+| `tests/integration/crawl.test.ts` | 32 | full public crawls of a local multi-feature site (scenario table below) |
+| `tests/integration/storage.test.ts` | 15 | local and S3 archive stores (below) |
+| `tests/integration/authenticated-crawl.test.ts` | 4 | form login, separate archives per profile, isolation, wrong password, redaction, mid-crawl reauthentication |
+| `tests/integration/authenticated-v31.test.ts` | 15 | protected assets, API/GraphQL discovery, manual sign-in, MFA, session reuse/expiry, combined discovery |
+| `tests/e2e/browser.test.ts` | 9 | JS rendering, SPA, lazy loading, full-mode interaction, render guard, offline click-through, visual comparison |
+| `tests/e2e/api.test.ts` | 21 | the production server over HTTP + SSE: accounts, CSRF, ownership, crawls, signed-in crawls |
+| `tests/e2e/worker.test.ts` | 9 | web tier and worker as separate processes: queue, object storage, shutdown, crash, restart, retention |
+| `tests/e2e/ui.test.ts` | 7 | the web UI driven in a real browser, plus the embedding headers |
+| `tests/live/live.test.ts` | 2 skipped | opt-in (`LIVE=1`), needs internet; **not run in this pass** |
 
-Test sites are local servers we control (`tests/fixtures/site.ts`): ~45 routes with nested paths, query URLs, pagination, an
-endless pagination trap, a calendar trap, robots.txt, nested sitemaps, JS-generated links, a pushState SPA, lazy images,
-CSS `@import`/backgrounds/fonts, duplicate images, flaky/rate-limited/permanently failing endpoints, soft-404 images, slow
-pages, a 2 MB file, redirects (internal, external, loop), and a second origin for the domain-boundary test.
+## What the new suites establish
 
-## Mapping to the 18 required scenarios
+### Database (`tests/db`)
+* An empty database gets the full schema (9 tables + `schema_migrations`); a second run applies nothing.
+* The migrated columns and their NOT NULL flags match `src/db/schema.ts` table by table — the SQL files and the ORM
+  schema cannot drift apart unnoticed.
+* A database in the exact shape version 3.0 created, **containing a row**, upgrades in place; the row survives with
+  `owner_id NULL` (and is therefore visible to nobody — asserted at the API as well).
+* Three migrations started at the same moment apply each file once.
+* A migration that fails half-way is rolled back completely, reported with its file name, and applies cleanly once fixed.
+* `npm run db:migrate` and `npm run user:create` behave as commands (exit codes, duplicate account, weak password,
+  unreachable database; the password is never echoed; the stored hash is scrypt). They read `.env`; real environment
+  variables win. `package.json` is asserted to run exactly the command line the tests use.
+* Constraints: case-insensitive unique email, foreign keys, cascades (deleting a job or a user leaves no profile,
+  session, command or event row behind).
+* The queue claim statement, issued by 8 competing connections against 20 queued jobs, hands out each job exactly once.
 
-| # | Scenario | Test(s) | Result |
-|---|---|---|---|
-| 1 | Simple multi-page site | integration "1. discovers simple multi-page navigation" | pass (≥ 20 pages from one URL) |
-| 2 | Deep nested routes | "2. downloads deeply nested routes" (4 levels) | pass |
-| 3 | Query-parameter URLs | "3. …" (`?id=123/456`, `?category=`, tracking params stripped, order-insensitive, utm duplicate not fetched twice); `crawlQueryParams=false` | pass |
-| 4 | Pagination | "4. follows pagination and caps endless pagination" + calendar trap test | pass |
-| 5 | Sitemap discovery | "5. …" (index → nested sitemaps; pages linked from nowhere) | pass |
-| 6 | JavaScript-rendered pages | browser "6. fast mode misses JS-generated links; JS mode finds them" | pass |
-| 7 | SPA navigation | browser "7. SPA…" (pushState routes, rendered content per route) + offline SPA copy | pass |
-| 8 | Lazy-loaded images | integration (`data-src`, no JS) and browser (IntersectionObserver below the fold, needs scrolling) | pass |
-| 9 | CSS background assets | "9. rewrites CSS url() and @import…", inline `style`, `<style>` | pass |
-| 10 | Font downloads | same test: `woff2`/`woff` downloaded and URLs rewritten | pass for download + rewrite. The fixture fonts are dummy bytes; real font *rendering* was not verified. |
-| 11 | Duplicate assets | "11. detects duplicate assets by content hash" | pass (after a bug fix, see below) |
-| 12 | Offline link rewriting | "12. …", "every local link resolves to a file", fallback page, redirect aliases, **browser click-through with all http(s) blocked: 0 network requests, 0 page errors** | pass |
-| 13 | ZIP integrity | "13. produces an intact ZIP…" (`AdmZip.test()`, entry-name safety, report files) and API ZIP download | pass |
-| 14 | Failed request recovery | "14. …": 500,500,200 → OK; 429+`Retry-After` → OK; asset 503,503 → OK; 404 hit once; permanent 500 hit 4× and reported with attempts | pass |
-| 15 | Cancellation | "15. cancels gracefully…" (partial valid ZIP), pause/resume freeze test, API pause/resume/cancel | pass |
-| 16 | SSRF protection | 51 unit tests + crawler-level refusal (server never contacted) + API 400s + browser render guard | pass |
-| 17 | Domain boundary | "17. never leaves the domain scope" (external server received **0** requests; out-of-scope redirect refused), scope unit tests | pass |
-| 18 | Resource quotas | total-size quota, per-file cap while streaming, max pages, max depth, wall-clock limit (partial ZIP) | pass |
+### Archive storage (`tests/integration/storage.test.ts`)
+* The same contract runs against both stores: byte-identical round-trip, delete, `move` semantics, refusal of keys
+  that could escape (`..`, absolute, spaces, empty) before any request is made.
+* **Signature V4 correctness, two independent ways.** (1) Pre-signed URLs produced by the built-in signer are compared,
+  character for character, with the output of AWS's own signer (`@smithy/signature-v4`, the library inside the AWS SDK
+  v3) for path-style and virtual-hosted addressing. (2) Every request the store sends goes through a gate that
+  recomputes the signature with that AWS library and answers 403 if it differs; the S3 test server behind it is never
+  reachable directly. This was necessary because `s3rver` on its own accepts any signature.
+* Anonymous, tampered, wrong-key and expired requests are refused (403); a pre-signed link stops working after its
+  lifetime; wrong secret / access key / region fail the start-up check with HTTP 403, a missing bucket with 404.
+* Uploads survive a short outage — two consecutive `503`, `429` or dropped connections are retried and the third
+  attempt stores the object; a lasting outage fails after exactly three attempts and keeps the source file; a `403`
+  is sent once and not retried.
 
-Also tested: robots.txt compliance, include/exclude patterns, assets toggle, resume from a saved snapshot (finished pages are
-not requested again), ZIP/disk cleanup after packaging, option clamping, malformed job ids / report path traversal at the API.
+This proves the request signing against AWS's reference implementation. It does **not** prove behaviour against a real
+provider (bucket policies, regional redirects, provider-specific limits, TLS).
 
-## Visual comparison — measured values
+### Web tier + worker as separate processes (`tests/e2e/worker.test.ts`)
+* A web tier with **no browser available** and no worker reports `{ok: true, worker: "offline"}`, keeps jobs `queued`,
+  never contacts the target site, answers 501 on the login self-test, can cancel and delete a queued job, and writes no
+  job directory.
+* A worker refuses to start without `DATABASE_URL`, and exits with `object storage upload failed: HTTP 403` on a wrong
+  S3 secret. It logs the Chromium version it found; `/healthz` answers 200.
+* A queued job is claimed, crawled and uploaded: the row records `storage: "s3"` and the object key, the worker's
+  scratch directory is gone, and the download route answers `302` (`no-store`) to a pre-signed link with
+  `X-Amz-Expires=60`. The downloaded bytes match the recorded SHA-256 and entry count. Another user gets 404; the bare
+  bucket URL gets 403; deleting the job removes the objects.
+* **SIGTERM**: the worker exits 0 after logging that it saves running crawls; the job is `interrupted`. A new worker
+  does not resume it by itself. After the owner resumes, it completes, and pages finished before the shutdown were
+  requested exactly once.
+* **SIGKILL**: the row stays `running` on the dead worker until another worker notices the stale heartbeat
+  (`WORKER_STALE_SECONDS=15` in the test) and marks it `interrupted`; resume then completes all 21 pages.
+* A signed-in crawl interrupted by a restart: password and session are `v2.` envelopes in the database the whole time,
+  the new worker logs “Restored the saved browser session”, the site sees **no second login**, both secrets are wiped
+  at the end, and the password appears in no process output.
+* Two workers, six jobs: each job was held by exactly one worker, both workers did work, each page was fetched once and
+  each job packaged once.
+* A resumed job picked up by a worker with an empty scratch disk starts over, says so in its log, and still completes.
+* Retention: a starting worker deletes a two-day-old ended crawl — row, events, archive and reports in the bucket — and
+  an orphaned scratch directory, while a recent crawl, its archive and its directory stay.
 
-Run on the fixture `/about` page (simple HTML + CSS), source vs offline copy:
+One defect surfaced here and is fixed: started through the `tsx` command-line wrapper, the worker ran as a child
+process and never received the signal — it kept crawling after “stop”. All entry points now run as a single process.
 
-| Viewport | Pixel mismatch | Verdict |
+### HTTP API (`tests/e2e/api.test.ts`)
+Accounts and sessions (cookie flags, only the token's hash stored, identical answers for wrong password and unknown
+account, rate limiting, registration modes, CSRF token **and** origin, logout), input validation (permission
+confirmation, private/metadata/non-http targets refused by a default-configured server, malformed ids), a full crawl
+with live events, reconnect via `Last-Event-ID`, ZIP + checksum + reports, pause/resume/cancel, per-user job limit,
+**ownership on every route** (a second user gets 404 for status, events, ZIP, reports, control, credentials, sign-in
+sessions, frames and input), and signed-in crawls end to end: credentials only ever stored encrypted and never
+returned, wiped at the end and on failure; manual sign-in through frames and forwarded input including a one-time
+code; clearing credentials mid-sign-in; combined discovery with the access matrix; the login self-test leaking nothing.
+
+### Web UI in a browser (`tests/e2e/ui.test.ts`)
+A visitor sees only the sign-in form. Then, clicking and typing like a user: wrong password rejected, account created,
+sign-in (cookie is HttpOnly and invisible to page scripts), start refused without the permission checkbox, a login
+profile filled in, the crawl started — the password field empties and the password is no longer anywhere in the page —
+the site's one-time-code step appears in the remote sign-in panel as a real 1280×800 frame, the job shows “waiting for
+sign-in” with no Resume button, a wrong code typed on the keyboard is rejected by the site, the right one entered
+through the text box lets the crawl continue to “completed”, the ZIP is downloaded through the browser and contains
+the signed-in page, the stored secrets are gone from the database; history survives a reload; a report opens; delete
+removes the job; sign-out removes the session. Throughout, the page logged no console error, no uncaught exception and
+no unexpected 4xx/5xx response. A second server checks `APP_EMBED_ORIGINS`: default `DENY` / `frame-ancestors 'none'`;
+with an allow-list only valid origins appear and the cookie becomes `__Host-…; Secure; SameSite=None; Partitioned`.
+
+Not covered by the UI test: the advanced-settings panel, pause/resume/cancel buttons, the multi-profile and combined
+controls, the interrupted-crawl Resume button (these paths are tested through the API, not by clicking), narrow/mobile
+layouts, accessibility, and any browser other than Chromium.
+
+### Signed-in crawling (`tests/integration/authenticated-*.test.ts`)
+Against a test-owned site with cookie sessions, a one-time-code step, role-specific pages, protected assets, JSON and
+GraphQL APIs and endpoints that count destructive hits: protected images/CSS/fonts/SVG/backgrounds/lazy and responsive
+images downloaded with the session and rewritten; API calls recorded, JSON redacted, pagination followed with GET,
+authorised GraphQL queries only, **every state-changing request blocked** (the site's counters stay at zero); manual
+sign-in handed to the user, with timeout; MFA pause without answering it, and fail-closed without an MFA selector;
+session restore, invalid restored session, expiry mid-crawl with the interrupted page kept, manual reauthentication;
+combined discovery with isolation between accounts and a failing profile not affecting the others.
+
+## Public crawling: the 18 scenarios (`tests/integration/crawl.test.ts`, `tests/e2e/browser.test.ts`)
+
+| # | Scenario | Result |
 |---|---|---|
-| desktop 1366×900 | 0.000 % | close match |
-| tablet 768×1024 | 0.000 % | close match |
-| mobile 390×844 | 0.000 % | close match |
+| 1 | Simple multi-page site | pass (≥ 20 pages from one URL) |
+| 2 | Deep nested routes (4 levels) | pass |
+| 3 | Query-parameter URLs, tracking params stripped, order-insensitive | pass |
+| 4 | Pagination, endless-pagination and calendar traps capped | pass |
+| 5 | Sitemap discovery (index → nested; pages linked from nowhere) | pass |
+| 6 | JavaScript-rendered links (fast mode misses them, JS mode finds them) | pass |
+| 7 | SPA navigation (pushState routes) + offline SPA copy | pass |
+| 8 | Lazy-loaded images (`data-src`; IntersectionObserver below the fold) | pass |
+| 9 | CSS backgrounds, `@import`, inline styles | pass |
+| 10 | Fonts downloaded and rewritten | pass for download + rewrite; fixture fonts are dummy bytes, rendering not verified |
+| 11 | Duplicate assets by content hash | pass |
+| 12 | Offline link rewriting; browser click-through with all http(s) blocked: 0 requests, 0 page errors | pass |
+| 13 | ZIP integrity and entry-name safety | pass |
+| 14 | Failed-request recovery (500→OK, 429 + `Retry-After`, permanent failure reported with attempts) | pass |
+| 15 | Cancellation with a valid partial ZIP; pause/resume | pass |
+| 16 | SSRF protection (51 unit tests + crawler, API and browser-guard level) | pass |
+| 17 | Domain boundary (the external server received 0 requests) | pass |
+| 18 | Resource quotas (total size, per-file cap while streaming, pages, depth, wall clock) | pass |
 
-This only shows the pipeline works on a trivial page (and a second test proves it *detects* offline-missing resources).
-It is **not** evidence of fidelity on real-world sites.
+Visual comparison on the fixture `/about` page: 0.000 % pixel mismatch at desktop, tablet and mobile sizes. This shows
+the pipeline works on a trivial page (a second test proves it flags resources missing offline); it is **not** evidence
+of fidelity on real-world sites.
 
-## Bugs the tests found (and which were fixed)
+## Defects found by testing in this pass (all fixed, each now covered by a test)
 
-1. **HTTP size limit misclassified** – destroying the response emitted `aborted` before our `too_large` rejection, so oversize
-   downloads were reported as generic network errors (and retried). Fixed by rejecting before destroying. (unit test)
-2. **Duplicate-asset race** – two identical images downloaded concurrently were both stored because the hash was registered
-   after the first `await`. Fixed by claiming hash and path synchronously. (integration test)
-3. **Missing assets pointed at the disk root** – a failed `url(/img/x.png)` stayed root-relative, which resolves to `file:///img/x.png`
-   offline. Now rewritten to the absolute live URL and reported. (integration test)
-4. **Query suffix naming** – `index__id-123-<hash>.html` was needlessly ugly; simplified for common `a=b&c=d` queries.
-5. **Missing file-type** – `.bin`, `.exe`, `.iso`… links were treated as pages; added to the static-file set.
-6. **Control API** – pausing an already finished job returned 200; now 409. (API test)
-7. **Style attribute quoting** – inline `style` rewritten to `url("…")` produced `&quot;` in attributes; now single quotes.
+1. **Worker ignored SIGTERM/SIGKILL** when started through the `tsx` wrapper (signals hit the wrapper only).
+2. **Reauthentication could stall**: session expiry was judged from a 15-second-old cached probe. It now always probes.
+3. **Report said `running` and doubled the duration** for finished crawls (reports were written before the final
+   status and the clock segment was counted twice).
+4. **Security headers set globally replaced the report route's own sandbox policy.** Page headers now apply to pages only.
+5. **Two servers with different network policies on one database** took each other's jobs and failed them. Documented
+   as a deployment rule; the tests give such servers separate databases.
+6. **SVG `<image href>` / `<use href>`** references were not rewritten.
+7. **GraphQL records with the same URL overwrote each other** in the API report.
+8. **Sign-in panel**: keystrokes were sent as parallel requests and could arrive out of order (now one ordered,
+   batched stream); the panel requested one more frame after the sign-in ended and logged a 404 (the route now answers
+   204 to the owner); the page URL shown in the panel did not update.
+9. **UI**: a crawl waiting for a person showed “paused” with a Resume button; resuming an interrupted crawl did not
+   reconnect the live view; `queued` had no status style; anonymous page loads logged a 401 from `/api/auth/me`.
+10. **Upload retry** (added in this pass) initially also retried invalid-key errors; caught by the storage contract test.
+11. A resumed crawl claimed by a worker without the saved state **failed**; it now starts over and says so.
 
-Several first-run failures were wrong test fixtures/expectations (e.g. a fixture that returned the same page for every
-`?id=`, which the engine *correctly* de-duplicated) — those were fixed in the tests, not hidden.
+Several first-run failures were wrong expectations in new tests (for example a log line that does not exist, or the
+depth ceiling of 20); those were corrected in the tests and are not listed as product defects.
 
-## Not tested / known gaps
+## Not tested
 
-* Real process kill + restart resume (only snapshot-copy resume is tested).
-* Subdomain crawling with real DNS names (scope logic is unit-tested; the fixtures use loopback ports).
-* Large crawls (thousands of pages), memory profile under 8 workers × large files.
-* HTTPS/SSL error paths (classification code exists; no TLS fixture was built).
-* Windows/macOS file-system behaviour of the generated paths (names are restricted to portable characters but were only run on Linux).
-* Rendering of real fonts/frameworks (React/Vue/Angular/Next production sites) — only synthetic SPA/JS fixtures.
+* **Playwright's own Chromium 158**, and any browser other than Chromium 153.
+* **Real infrastructure**: no deployment to Vercel; no managed PostgreSQL (pooling, TLS, failover); no AWS S3,
+  Cloudflare R2 or MinIO; no container build (no Docker in the sandbox — the Dockerfile in DEPLOYMENT.md is unbuilt).
+* **Third-party sign-in**: no Google/Microsoft/Okta/Auth0 login, no real CAPTCHA, no passkeys, no popup-based flow.
+  The sign-in fixtures are test-owned sites.
+* **The public internet**: the opt-in live test was not run in this pass; all sites were local fixtures on loopback
+  (which is why the test servers run with `CRAWLER_ALLOW_PRIVATE_NETWORKS=1`; the strict default is tested separately).
+* **Load and endurance**: no crawl beyond a few dozen pages, no memory profile, no long-running worker, no many-user
+  or many-viewer test. The concurrency tests use 2 workers and 6 jobs.
+* **Database outage during a crawl**, a network partition between worker and database, and a worker's disk filling up.
+* Saved-session expiry by TTL (`CRAWLER_SESSION_TTL_HOURS`) was not exercised by a test.
+* HTTPS/TLS error paths, subdomain crawling with real DNS names, Windows/macOS extraction of the generated paths.
+* No security review or penetration test by anyone other than the author.
 
-## Authenticated-crawling increment (2026-11-12)
+## Reproduce
 
-### Automated results in this sandbox
-
-| Command | Result |
-|---|---|
-| `npm run typecheck` | Pass |
-| `npm run lint` | Pass with no ESLint warnings |
-| `DATABASE_URL=postgres://localhost/postgres npm run build` | Pass. Next route collection requires `DATABASE_URL`; this placeholder satisfies build-time configuration only and does not establish a live PostgreSQL service. |
-| `npx vitest run tests/unit tests/integration tests/e2e/browser.test.ts` | Pass: 130 passed, 13 skipped across 7 files. Existing public crawling integration tests pass. |
-| Full `npx vitest run` before build | Not a full-suite pass: the production API test requires a prior build. After building, the API suite was not run because this environment has no confirmed PostgreSQL service. |
-
-The 13 skipped tests are browser-dependent: the existing nine Chromium tests and four new authenticated-browser scenarios. This sandbox has no Playwright Chromium headless-shell executable. They were skipped by the test guard; **no authenticated browser login, protected-page download, session isolation, MFA, or session-expiration recovery was executed here**.
-
-### Added coverage
-
-- `tests/unit/auth.test.ts` (4 passed): AES-256-GCM envelope encryption and tamper rejection, safe profile projection, unsafe URL / missing verification-selector rejection, constant-time operator-token check.
-- `tests/integration/authenticated-crawl.test.ts` (4 skipped without Chromium): test-owned website with a real form POST and cookie session, dashboard and nested private orders/settings routes; assertions cover verified login, separate profile archives, session isolation, invalid credentials, expiry/re-authentication, and password redaction.
-- `tests/fixtures/auth-site.ts`: local controlled website fixture; used only by tests.
-
-### Acceptance coverage and outstanding gaps
-
-Code added for isolated per-profile **separate archives**, verified standard form login, encrypted profile storage, authenticated browser GET rendering, bounded login-origin form POSTs, session-expiration pause/re-authentication on resume, and bearer checks on auth-sensitive endpoints. Browser-backed behavior is not claimed as runtime-verified because Chromium was unavailable.
-
-Still incomplete relative to the request: manual/headed browser login and human MFA completion, combined-discovery mode, browser-cookie-authenticated asset downloads, authenticated XHR/API crawling, and application-level authorization on the existing non-auth crawl/history/control/download APIs. The application must remain behind a trusted access-control proxy. The implementation therefore does **not** meet the full acceptance bar yet.
-
-### Reproduction
-
-```sh
-npm run typecheck
-npm run lint
-DATABASE_URL=postgres://localhost/postgres npm run build
-npx vitest run tests/unit tests/integration tests/e2e/browser.test.ts
+```bash
+npm install
+npm run typecheck && npm run lint
+npm run build            # the e2e suites drive the production build
+npm test                 # ≈ 9 minutes; starts its own PostgreSQL and S3 test servers; needs a Chromium (see above)
 ```
-
-To execute authenticated browser tests instead of skip, install the exact Chromium headless-shell version required by the pinned Playwright, ensure OS libraries are installed, and rerun. For production API end-to-end tests, provide a live PostgreSQL service/schema and run the build before the full suite.

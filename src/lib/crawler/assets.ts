@@ -21,6 +21,8 @@ export interface AssetRecord {
   duplicateOf?: string;
   isCss?: boolean;
   external: boolean;
+  /** Authenticated crawls: whether the file was fetched with the profile's session or anonymously (shared, public). */
+  fetchedWith?: "session" | "anonymous";
 }
 
 export interface AssetDeps {
@@ -34,7 +36,7 @@ export interface AssetDeps {
   maxFileSize: number;
   /** Normalises an asset URL (keeps query strings, strips tracking). */
   normalize: (raw: string) => string | null;
-  fetch: (url: string, maxBytes: number) => Promise<HttpResult & { attempts: number }>;
+  fetch: (url: string, maxBytes: number) => Promise<HttpResult & { attempts: number; fetchedWith?: "session" | "anonymous" }>;
   remainingBytes: () => number;
   addBytes: (n: number) => void;
   log: (tag: LogTag, msg: string) => void;
@@ -116,9 +118,10 @@ export class AssetManager {
       rec.error = "total size quota reached";
       return rec;
     }
-    let res: HttpResult & { attempts: number };
+    let res: HttpResult & { attempts: number; fetchedWith?: "session" | "anonymous" };
     try {
       res = await this.d.fetch(url, Math.min(this.d.maxFileSize, remaining));
+      if (res.fetchedWith) rec.fetchedWith = res.fetchedWith;
     } catch (e) {
       const err = e as HttpError;
       if (this.d.isCancelled()) {

@@ -1,29 +1,44 @@
-/**
- * Creates an application user (the only way to get an account when AUTH_REGISTRATION is "closed").
- *   DATABASE_URL=… npm run user:create -- someone@example.com            (prompts for the password on stdin)
- *   DATABASE_URL=… USER_PASSWORD=… npm run user:create -- someone@example.com
- */
-import readline from "node:readline";
-import { closeDb } from "@/db";
-import { createUser } from "@/lib/server/users";
+
+import { createUser } from "../src/lib/server/users";
+import { createInterface } from "node:readline/promises";
+import { stdin, stdout } from "node:process";
 
 async function main() {
   const email = process.argv[2];
-  if (!email) throw new Error("usage: npm run user:create -- <email> [role]");
-  let password = process.env.USER_PASSWORD ?? "";
-  if (!password) {
-    const rl = readline.createInterface({ input: process.stdin, output: process.stderr, terminal: false });
-    process.stderr.write("Password (min. 10 characters): ");
-    password = await new Promise<string>((resolve) => rl.once("line", resolve));
-    rl.close();
+  const role = process.argv[3] === "admin" ? "admin" : "user";
+
+  if (!email) {
+    console.error(
+      "Usage: npm run user:create -- rahul4319q@gmail.com admin"
+    );
+    process.exit(1);
   }
-  const user = await createUser(email, password, process.argv[3] === "admin" ? "admin" : "user");
-  console.log(`created user ${user.email} (${user.id})`);
+
+  const password = process.env.USER_PASSWORD;
+
+  let finalPassword = password;
+
+  if (!finalPassword) {
+    const rl = createInterface({ input: stdin, output: stdout });
+
+    try {
+      finalPassword = await rl.question("Enter a new password: ");
+    } finally {
+      rl.close();
+    }
+  }
+
+  if (!finalPassword || finalPassword.length < 12) {
+    throw new Error("Password must be at least 12 characters long.");
+  }
+
+  await createUser(email, finalPassword, role);
+
+  console.log(`User created successfully: ${email}`);
+  console.log(`Role: ${role}`);
 }
 
-main()
-  .catch((e) => {
-    console.error((e as Error).message);
-    process.exitCode = 1;
-  })
-  .finally(() => closeDb());
+main().catch((error) => {
+  console.error("User creation failed:", error.message);
+  process.exit(1);
+});

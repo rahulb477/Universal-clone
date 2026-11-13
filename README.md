@@ -37,8 +37,8 @@ why it stopped at limited pages, and an honest account of what was ported versus
 ## Quick start (single server)
 
 ```bash
-npm install
-npx playwright-core install --with-deps chromium   # or set CHROMIUM_PATH to an installed Chromium/Chrome
+npm ci                                             # installs the committed lockfile
+npm run chromium:install                           # or set CHROMIUM_PATH to an installed Chromium/Chrome
 cp .env.example .env                               # set DATABASE_URL and CRAWLER_CREDENTIAL_ENCRYPTION_KEY
 npm run db:migrate                                 # creates / upgrades the schema
 npm run user:create -- you@example.com             # accounts are operator-created by default; asks for a password
@@ -49,13 +49,18 @@ No terminal (Vercel, phone browser)? Set `ADMIN_SETUP_KEY` (32+ random character
 environment variables and open `/setup-admin` once to create the first administrator — see
 [docs/ADMIN-SETUP.md](docs/ADMIN-SETUP.md).
 
-Requires Node 20.12+ and PostgreSQL. No PostgreSQL at hand? `npm run db:dev` starts a real local server from an npm
-package and prints its `DATABASE_URL` (development only).
+Requires **Node.js 22 and npm 11** (supported: Node `>=20.18.1 <25`, npm `>=10.9.0`; see
+[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md#toolchain-and-reproducible-installs)) and PostgreSQL. `package-lock.json` is
+committed — deploy with `npm ci`, and regenerate the lockfile when you change a dependency.
+
+No PostgreSQL at hand? `npm run db:dev` starts a real local server from an npm package and prints its `DATABASE_URL`
+(development only).
 
 Chromium is needed for JavaScript/Full rendering, signed-in crawling and visual comparison. Without it, public crawls
 **fall back to Fast mode with a warning in the log and the report** — they never fail silently.
 
-For Vercel + worker, object storage, scaling and upgrades from 3.0, read **[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)**.
+For Vercel + worker, Hostless Cloud (exact worker build/start configuration), object storage, scaling and upgrades from
+3.0, read **[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)**.
 Every environment variable is listed with its default in [`.env.example`](.env.example).
 
 ## HTTP API
@@ -138,4 +143,7 @@ See [docs/TESTING-REPORT.md](docs/TESTING-REPORT.md) for what is covered and the
   try JavaScript rendering for client-rendered sites.
 * **Missing images offline** – see `assets-manifest.json` (`status: failed/skipped` with reasons) and the visual report.
 * **Crawl stops early** – `stopReason` in the report: time limit, total size quota or page limit.
+* **Install fails with `Cannot read properties of null (reading 'edgesOut')`** – a crash inside npm's resolver, not a
+  dependency problem. Install from the committed lockfile with `npm ci` (and use npm 11 / Node 22). See
+  [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md#toolchain-and-reproducible-installs).
 * **Preview/health** – `GET /api/health`.

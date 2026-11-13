@@ -2,9 +2,16 @@
   "name": "universal-clone",
   "private": true,
   "engines": {
-    "node": ">=20.12"
+    "node": ">=20.18.1 <25",
+    "npm": ">=10.9.0"
+  },
+  "packageManager": "npm@11.21.2",
+  "volta": {
+    "node": "22.22.3",
+    "npm": "11.21.2"
   },
   "scripts": {
+    "preinstall": "node scripts/check-toolchain.mjs",
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
@@ -14,6 +21,7 @@
     "db:migrate": "node --import ./scripts/load-env.mjs --import tsx src/db/migrate.ts",
     "user:create": "node --import ./scripts/load-env.mjs --import tsx scripts/create-user.ts",
     "chromium:check": "node scripts/chromium-env.mjs",
+    "chromium:install": "node scripts/install-chromium.mjs",
     "test": "vitest run",
     "test:unit": "vitest run tests/unit",
     "test:integration": "vitest run tests/integration",
@@ -22,6 +30,7 @@
     "db:dev": "node scripts/dev-postgres.mjs"
   },
   "dependencies": {
+    "@sparticuz/chromium": "^153.0.0",
     "archiver": "^8.0.0",
     "cheerio": "^1.2.0",
     "dotenv": "17.3.1",
@@ -38,7 +47,6 @@
   "devDependencies": {
     "@aws-crypto/sha256-js": "^5.2.0",
     "@smithy/signature-v4": "^5.7.5",
-    "@sparticuz/chromium": "^153.0.0",
     "@tailwindcss/postcss": "4.1.17",
     "@types/adm-zip": "^0.5.8",
     "@types/archiver": "^8.0.0",

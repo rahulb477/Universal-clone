@@ -74,7 +74,8 @@ mode `POST /api/auth/test` answers `501` rather than starting a browser in the w
 * Site passwords, saved browser sessions (cookies + storage), typed sign-in input in transit through the queue, and the
   screenshots of the manual sign-in browser are stored only as AES-256-GCM envelopes (`v2.<iv>.<tag>.<ciphertext>`)
   under `CRAWLER_CREDENTIAL_ENCRYPTION_KEY`. Each envelope is bound to its purpose and row (`profile:<id>`,
-  `session:<id>`, `login-frame:<id>`, `cmd:<jobId>`) as authenticated data, so a ciphertext copied onto another row
+  `session:<id>`, `login-frame:<id>`, `cmd:<jobId>`, `saved-session:<profileId>:<ownerId>:<host>`,
+  `cmd:login-browser:<sid>`) as authenticated data, so a ciphertext copied onto another row
   does not decrypt.
 * They are **erased when the crawl reaches a final state** (`completed`, `failed`, `cancelled`): `secret` and
   `session_state` become `NULL`, `cleared_at` is set. They are kept — encrypted — only while a crawl is queued, running,
@@ -99,6 +100,35 @@ mode `POST /api/auth/test` answers `501` rather than starting a browser in the w
   API. Input events are validated (type, coordinates, key names, text length), frames are readable by the owner only,
   form submissions are limited to the login origin plus explicitly listed sign-in origins, and the window closes after
   `CRAWLER_INTERACTIVE_LOGIN_MINUTES`. Nothing is filled in or solved automatically during a manual sign-in.
+
+## Reusable saved logins ("Login with Browser")
+
+* **Encryption at rest.** A captured session is sealed as `v2.<iv>.<tag>.<ciphertext>` with AES-256-GCM under
+  `CRAWLER_CREDENTIAL_ENCRYPTION_KEY`, with the authenticated data `saved-session:<profileId>:<ownerId>:<targetHost>`.
+  Copying the ciphertext to another profile, owner or host makes it undecryptable (tested by moving the row).
+* **Site scoping before encryption.** Whatever the browser collected is passed through `scopeSessionState`: only cookies
+  for the profile's host (and its parent domain; sub-domains only with `matchSubdomains`) survive. A login can therefore
+  never be replayed to a different site — the check runs on capture, again when attaching a job, and again on decrypt.
+* **Owner scoping.** Every read, rename, delete, attach and window operation goes through a query filtered by the owner;
+  a foreign id answers an identical `404`. The window's input/frame endpoints re-check ownership on every request.
+* **No session material in the UI.** Responses carry metadata only: status, cookie **count**, capture/expiry times, last
+  used. Cookie names and values never leave the server; after a save the browser holds nothing it could replay.
+* **No plaintext passwords.** The “Login with Browser” flow never sees a password field value in a stored form — the user
+  types it straight into the remote page, and the typed characters cross the queue as an encrypted `cmd:login-browser:<sid>`
+  envelope that the worker deletes as soon as it has been applied. Nothing typed is persisted in the command row's
+  `payload`, in the window row, or in the profile.
+* **Redaction.** Window page URLs are stored origin + path only (no query string, which can carry one-time codes);
+  the activity log records that a saved login was restored, never its contents. Tests assert that neither credentials
+  nor cookie values appear in the page HTML, the process output, the database rows or the ZIP.
+* **Isolation.** Every window and every crawl gets its own Chromium context on the worker. Windows may only navigate
+  inside the profile's site; other origins are refused by the request policy and reported in the UI. Closing a window,
+  finishing a crawl or deleting a profile drops the context and its frames.
+* **No bypass.** CAPTCHA, MFA, SSO, paywalls and anti-bot challenges are answered by the human in the window. The server
+  never solves them; the “import a request” fallback only accepts cookies/storage from a session the user already has,
+  and refuses a `curl` for another site.
+* **Session lifetime.** Saved sessions expire after `CRAWLER_SAVED_SESSION_TTL_HOURS`; a rejection by the site marks the
+  profile `session-rejected` and requires a new sign-in rather than falling back to anonymous crawling.
+* **Rate limits.** Window creation, input events and profile creation are rate-limited per user in PostgreSQL.
 
 ## Archive storage
 

@@ -66,12 +66,70 @@ export const authProfiles = pgTable("auth_profiles", {
   sessionExpiresAt: ts("session_expires_at"),
   clearedAt: ts("cleared_at"),
   createdAt: ts("created_at").notNull().defaultNow(),
+  /** The reusable "Login with Browser" profile this per-crawl login was copied from, if any. */
+  savedProfileId: text("saved_profile_id"),
+});
+
+/**
+ * A reusable "Login with Browser" profile: an owner-scoped, origin-locked browser session that can be
+ * attached to later crawls. Holds metadata only — the session itself lives in savedLoginSessions,
+ * encrypted with additional authenticated data binding it to this profile, its owner and its origin.
+ */
+export const targetLoginProfiles = pgTable("target_login_profiles", {
+  id: text("id").primaryKey(),
+  ownerId: text("owner_id").notNull(),
+  name: text("name").notNull(),
+  /** Host (plus non-default port) this profile may be used for. */
+  targetHost: text("target_host").notNull(),
+  targetOrigin: text("target_origin").notNull(),
+  /** Allow subdomains of targetHost (app.example.com for example.com). */
+  matchSubdomains: boolean("match_subdomains").notNull().default(false),
+  startUrl: text("start_url").notNull(),
+  loginUrl: text("login_url"),
+  authenticatedSelector: text("authenticated_selector"),
+  usernameHint: text("username_hint").notNull().default(""),
+  /** active | needs-request-capture | session-expired | session-rejected | login-failed */
+  status: text("status").notNull().default("active"),
+  statusMessage: text("status_message"),
+  lastUsedAt: ts("last_used_at"),
+  useCount: integer("use_count").notNull().default(0),
+  createdAt: ts("created_at").notNull().defaultNow(),
+  updatedAt: ts("updated_at").notNull().defaultNow(),
+});
+
+/** Encrypted browser session of one reusable profile. Never leaves the server. */
+export const savedLoginSessions = pgTable("saved_login_sessions", {
+  profileId: text("profile_id").primaryKey(),
+  ownerId: text("owner_id").notNull(),
+  state: text("state").notNull(),
+  cookieCount: integer("cookie_count").notNull().default(0),
+  originCount: integer("origin_count").notNull().default(0),
+  capturedAt: ts("captured_at").notNull().defaultNow(),
+  expiresAt: ts("expires_at").notNull(),
+  lastValidatedAt: ts("last_validated_at"),
+  invalidatedAt: ts("invalidated_at"),
+  invalidatedReason: text("invalidated_reason"),
+});
+
+/** Web -> worker commands for reusable-profile sign-in windows (they exist outside any job's queue). */
+export const loginProfileCommands = pgTable("login_profile_commands", {
+  id: bigserial("id", { mode: "number" }).primaryKey(),
+  sid: text("sid").notNull(),
+  savedProfileId: text("saved_profile_id").notNull(),
+  ownerId: text("owner_id").notNull(),
+  /** open | input | confirm | cancel */
+  type: text("type").notNull(),
+  payload: text("payload"),
+  createdAt: ts("created_at").notNull().defaultNow(),
+  processedAt: ts("processed_at"),
+  result: text("result"),
 });
 
 export const loginSessions = pgTable("login_sessions", {
   id: text("id").primaryKey(),
-  jobId: text("job_id").notNull(),
-  profileId: text("profile_id").notNull(),
+  /** Null for a standalone "Login with Browser" session (see savedProfileId). */
+  jobId: text("job_id"),
+  profileId: text("profile_id"),
   ownerId: text("owner_id").notNull(),
   reason: text("reason").notNull(),
   status: text("status").notNull(),
@@ -83,6 +141,10 @@ export const loginSessions = pgTable("login_sessions", {
   createdAt: ts("created_at").notNull().defaultNow(),
   expiresAt: ts("expires_at").notNull(),
   finishedAt: ts("finished_at"),
+  /** Set when this window signs in a reusable profile instead of a crawl's own login. */
+  savedProfileId: text("saved_profile_id"),
+  /** "crawl" (a job's sign-in) or "login-browser" (standalone reusable-profile sign-in). */
+  scope: text("scope").notNull().default("crawl"),
 });
 
 export const jobCommands = pgTable("job_commands", {
@@ -126,4 +188,6 @@ export const adminSetup = pgTable("admin_setup", {
 export type CrawlJobRow = typeof crawlJobs.$inferSelect;
 export type AuthProfileRow = typeof authProfiles.$inferSelect;
 export type LoginSessionRow = typeof loginSessions.$inferSelect;
+export type TargetLoginProfileRow = typeof targetLoginProfiles.$inferSelect;
+export type SavedLoginSessionRow = typeof savedLoginSessions.$inferSelect;
 export type UserRow = typeof users.$inferSelect;

@@ -36,7 +36,7 @@ beforeAll(async () => {
   pg = await startPostgres();
   // Schema and accounts are created with the same command-line tools an operator uses.
   const m = runCli("src/db/migrate.ts", [], { DATABASE_URL: pg.url });
-  expect(m.out).toContain("migrations applied: 0000_initial.sql, 0001_users_ownership_queue.sql, 0002_admin_setup.sql");
+  expect(m.out).toContain("migrations applied: 0000_initial.sql, 0001_users_ownership_queue.sql, 0002_admin_setup.sql, 0003_saved_login_profiles.sql");
   for (const email of ["alice@owner.test", "bob@owner.test"]) {
     const r = runCli("scripts/create-user.ts", [email], { DATABASE_URL: pg.url, USER_PASSWORD: PASSWORD });
     expect(r.code, r.out).toBe(0);

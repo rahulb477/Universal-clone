@@ -87,11 +87,11 @@ export default function SetupAdminForm() {
     return (
       <section aria-label="Setup complete" className="space-y-4">
         <div className="flex items-center gap-3">
-          <span aria-hidden className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-emerald-100 text-xl text-emerald-700">✓</span>
-          <h2 className="text-lg font-semibold text-slate-900">Administrator created</h2>
+          <span aria-hidden className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-emerald-100 text-xl text-emerald-300">✓</span>
+          <h2 className="text-lg font-semibold text-slate-50">Administrator created</h2>
         </div>
-        <p className="text-sm text-slate-600">
-          <span className="font-medium text-slate-900">{createdEmail}</span> now has the administrator role. First-administrator setup is disabled from now on.
+        <p className="text-sm text-slate-400">
+          <span className="font-medium text-slate-50">{createdEmail}</span> now has the administrator role. First-administrator setup is disabled from now on.
         </p>
         <Link href="/" className="block w-full rounded-lg bg-indigo-600 px-4 py-3 text-center font-semibold text-white hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-indigo-300">
           Continue to sign in
@@ -99,23 +99,23 @@ export default function SetupAdminForm() {
         <p className="text-xs text-slate-500">
           Sign in with the email address and password you just chose.
         </p>
-        <button type="button" onClick={() => window.location.reload()} className="block w-full text-center text-xs text-slate-500 underline hover:text-slate-800">
+        <button type="button" onClick={() => window.location.reload()} className="block w-full text-center text-xs text-slate-500 underline hover:text-slate-100">
           Reload this page
         </button>
       </section>
     );
   }
 
-  const label = "mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-600";
+  const label = "mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-400";
   const input =
-    "w-full rounded-lg border border-slate-300 bg-white px-3 py-2.5 text-base text-slate-900 placeholder:text-slate-400 focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-200 disabled:bg-slate-50";
-  const toggle = "shrink-0 rounded-lg border border-slate-300 px-3 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-indigo-300";
+    "w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2.5 text-base text-slate-50 placeholder:text-slate-400 focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/40 disabled:bg-slate-800/50";
+  const toggle = "shrink-0 rounded-lg border border-slate-700 px-3 py-2 text-xs font-medium text-slate-200 hover:bg-slate-800/50 focus:outline-none focus:ring-2 focus:ring-indigo-300";
 
   return (
     <form onSubmit={submit} noValidate className="space-y-4">
       <header>
-        <h2 className="text-lg font-semibold text-slate-900">Create the first administrator</h2>
-        <p className="mt-1 text-sm text-slate-600">This can be done once. Use the setup key from the deployment&apos;s environment variables.</p>
+        <h2 className="text-lg font-semibold text-slate-50">Create the first administrator</h2>
+        <p className="mt-1 text-sm text-slate-400">This can be done once. Use the setup key from the deployment&apos;s environment variables.</p>
       </header>
 
       <div>
@@ -170,7 +170,7 @@ export default function SetupAdminForm() {
               </p>
             ))
           ) : (
-            <p className="text-xs text-emerald-700">Strong password.</p>
+            <p className="text-xs text-emerald-300">Strong password.</p>
           )}
         </div>
       </div>
@@ -198,7 +198,7 @@ export default function SetupAdminForm() {
           </button>
         </div>
         {mismatch && (
-          <p id="setup-confirm-error" className="mt-1 text-xs text-rose-700">
+          <p id="setup-confirm-error" className="mt-1 text-xs text-rose-300">
             The passwords do not match.
           </p>
         )}
@@ -231,7 +231,7 @@ export default function SetupAdminForm() {
       </div>
 
       {error && (
-        <p role="alert" className="rounded-lg bg-rose-50 px-3 py-2 text-sm text-rose-700 ring-1 ring-rose-200">
+        <p role="alert" className="rounded-lg bg-rose-500/10 px-3 py-2 text-sm text-rose-300 ring-1 ring-rose-500/40">
           {error}
         </p>
       )}
@@ -245,7 +245,7 @@ export default function SetupAdminForm() {
         {busy ? "Creating administrator…" : "Create administrator"}
       </button>
 
-      <Link href="/" className="block text-center text-sm text-slate-500 underline hover:text-slate-800">
+      <Link href="/" className="block text-center text-sm text-slate-500 underline hover:text-slate-100">
         I already have an account — sign in
       </Link>
     </form>

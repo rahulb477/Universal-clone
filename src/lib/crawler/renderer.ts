@@ -4,6 +4,7 @@ import { USER_AGENT } from "./http";
 import type { AuthProfile } from "./auth";
 import { classifyGraphql, classifyGraphqlDocument, type ApiObservation } from "./api-discovery";
 import { InteractiveLogin, LOGIN_VIEWPORT, type InteractiveReason, type SessionState } from "./interactive-login";
+import { hostMatchesScope } from "./saved-login";
 
 export interface RenderResult {
   html: string;
@@ -45,6 +46,12 @@ export interface ContextPolicy {
   loginPosts: number;
   /** login-interactive: origins the human-driven sign-in may navigate and submit to. */
   authOrigins: Set<string>;
+  /**
+   * login-interactive only: when set, a top-level navigation is also allowed when its host belongs
+   * to this scope (the profile's site and, if enabled, its subdomains). Used by "Login with Browser"
+   * so the window can move freely inside the site it is collecting a session for.
+   */
+  hostScope?: HostScope;
   interactiveMutations: number;
   /** crawl: explicitly authorised GraphQL endpoints (origin + path) whose read-only queries may pass. */
   graphqlEndpoints: Set<string>;
@@ -54,6 +61,12 @@ export interface ContextPolicy {
 }
 
 export type AuthOutcome = { status: "authenticated" } | { status: "interactive"; login: InteractiveLogin };
+
+/** A site a "Login with Browser" window may stay inside (see ProfileScope in saved-login.ts). */
+export interface HostScope {
+  targetHost: string;
+  matchSubdomains: boolean;
+}
 
 const MAX_LOGIN_POSTS = 3;
 const MAX_INTERACTIVE_MUTATIONS = 500;
@@ -155,7 +168,7 @@ export class Renderer {
    */
   async guardedContext(
     viewport = { width: 1366, height: 900 },
-    login?: string | { phase: ContextPolicy["phase"]; loginOrigin?: string; authOrigins?: Iterable<string> },
+    login?: string | { phase: ContextPolicy["phase"]; loginOrigin?: string; authOrigins?: Iterable<string>; hostScope?: HostScope },
     storageState?: SessionState,
   ): Promise<BrowserContext> {
     const ctx = await this.browser.newContext({
@@ -171,6 +184,7 @@ export class Renderer {
       loginOrigin: init?.loginOrigin,
       loginPosts: 0,
       authOrigins: new Set(init?.authOrigins ?? []),
+      hostScope: init?.hostScope,
       interactiveMutations: 0,
       graphqlEndpoints: this.graphqlEndpoints,
       graphqlRequests: 0,
@@ -213,7 +227,8 @@ export class Renderer {
             } catch {
               /* frame already gone */
             }
-            if (topLevel && !policy.authOrigins.has(target.origin)) {
+            const inScope = policy.hostScope ? hostMatchesScope(policy.hostScope, target.href) : false;
+            if (topLevel && !policy.authOrigins.has(target.origin) && !inScope) {
               policy.blockedOrigins.set(target.origin, (policy.blockedOrigins.get(target.origin) ?? 0) + 1);
               return await route.abort("blockedbyclient");
             }
@@ -341,9 +356,12 @@ export class Renderer {
    * Opens the login page in a fresh isolated context for the user to sign in by hand
    * (including any MFA or CAPTCHA the site presents — those are the user's to solve).
    */
-  async beginInteractiveLogin(profile: AuthProfile, opts: { timeoutMs: number; navigationTimeoutMs?: number; scopeOrigins?: string[]; reason?: InteractiveReason }): Promise<InteractiveLogin> {
+  async beginInteractiveLogin(
+    profile: AuthProfile,
+    opts: { timeoutMs: number; navigationTimeoutMs?: number; scopeOrigins?: string[]; reason?: InteractiveReason; hostScope?: HostScope },
+  ): Promise<InteractiveLogin> {
     await assertPublicUrl(profile.loginUrl, this.allowPrivate);
-    const ctx = await this.guardedContext(LOGIN_VIEWPORT, { phase: "login-interactive", authOrigins: this.interactiveOrigins(profile, opts.scopeOrigins) });
+    const ctx = await this.guardedContext(LOGIN_VIEWPORT, { phase: "login-interactive", authOrigins: this.interactiveOrigins(profile, opts.scopeOrigins), hostScope: opts.hostScope });
     try {
       const page = await ctx.newPage();
       page.setDefaultTimeout(opts.navigationTimeoutMs ?? 20000);

@@ -28,23 +28,23 @@ export default async function SetupAdminPage() {
           <p className="mt-1 text-sm text-slate-400">First administrator setup</p>
         </div>
 
-        <div className="rounded-2xl bg-white p-5 shadow-2xl ring-1 ring-black/5 sm:p-7">
+        <div className="rounded-2xl bg-slate-900 p-5 shadow-2xl ring-1 ring-black/5 sm:p-7">
           {status.setupAvailable ? (
             <SetupAdminForm />
           ) : (
             <section aria-label="Setup unavailable" className="space-y-4">
-              <h2 className="text-lg font-semibold text-slate-900">Setup is not available</h2>
-              <p role="status" className="rounded-lg bg-amber-50 px-3 py-2 text-sm text-amber-900 ring-1 ring-amber-200">
+              <h2 className="text-lg font-semibold text-slate-50">Setup is not available</h2>
+              <p role="status" className="rounded-lg bg-amber-500/10 px-3 py-2 text-sm text-amber-200 ring-1 ring-amber-500/40">
                 {status.message}
               </p>
               {status.state === "completed" ? (
-                <p className="text-sm text-slate-600">First-administrator setup can only be used once. Sign in with the administrator account you created.</p>
+                <p className="text-sm text-slate-400">First-administrator setup can only be used once. Sign in with the administrator account you created.</p>
               ) : status.state === "key-too-weak" ? (
-                <p className="text-sm text-slate-600">
+                <p className="text-sm text-slate-400">
                   {`ADMIN_SETUP_KEY must be a randomly generated secret of at least 32 characters. Generate one with “openssl rand -base64 48” and set it in your hosting environment, then reload this page.`}
                 </p>
               ) : (
-                <p className="text-sm text-slate-600">
+                <p className="text-sm text-slate-400">
                   {`An operator must set ADMIN_SETUP_KEY (a random secret of at least 32 characters) in the deployment's environment variables before this page can be used.`}
                 </p>
               )}

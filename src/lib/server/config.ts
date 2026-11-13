@@ -35,6 +35,17 @@ export const limits = {
   get interactiveLoginMinutes() {
     return Math.min(60, num("CRAWLER_INTERACTIVE_LOGIN_MINUTES", 10));
   },
+  /** How long one "Login with Browser" window may stay open. */
+  get browserLoginMinutes() {
+    return Math.min(60, num("CRAWLER_LOGIN_BROWSER_MINUTES", 15));
+  },
+  /** Lifetime of a saved login session before the user must sign in again. */
+  get savedSessionTtlHours() {
+    return num("CRAWLER_SAVED_SESSION_TTL_HOURS", 24 * 30);
+  },
+  get maxSavedProfiles() {
+    return Math.min(200, num("CRAWLER_MAX_SAVED_PROFILES", 25));
+  },
 };
 
 /**

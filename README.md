@@ -4,9 +4,11 @@ Enter **one URL**. The crawler discovers every public page inside the authorised
 pagination, meaningful `?query` URLs, sitemaps, JavaScript-rendered links), downloads the assets each page needs,
 rewrites links so the copy works offline, and packages everything as a ZIP together with a crawl report.
 
-It can also archive what a site shows **to an account you are authorised to use**: automatic form login or a manual
-sign-in in an isolated browser (SSO, MFA, CAPTCHA — you answer them yourself), protected assets, API discovery, and a
-combined mode that records which of several accounts can open which page.
+It can also archive what a site shows **to an account you are authorised to use**: press **Login with Browser**, sign in
+yourself in a real, isolated browser (SSO, MFA, CAPTCHA — you answer them, nothing is solved for you), press
+**Use This Login** once, and reuse that saved login for this and later downloads. Automatic form login per crawl,
+protected assets, API discovery, and a combined mode that records which of several accounts can open which page are
+also available.
 
 > Only crawl websites you own or have permission to archive. The crawler never bypasses authentication, paywalls,
 > CAPTCHAs, MFA or access controls, respects `robots.txt` by default, and blocks private-network targets.
@@ -24,7 +26,8 @@ why it stopped at limited pages, and an honest account of what was ported versus
 | Assets | HTML/CSS/JS/images/SVG/WebP/fonts/icons/video/documents, CSS `url()` + `@import` (recursive), `srcset`, lazy attributes, Open Graph images, JS string-literal scan, content-hash de-duplication |
 | Offline copy | Relative link rewriting, `index.html` per route, query pages as `index__page-2.html`, redirect aliases, local fallback page for unarchived routes, route map |
 | Live UI | Start / Pause / Resume / Cancel, advanced settings, live stats + activity log over Server-Sent Events, history, ZIP download, report links |
-| Signed-in crawling | Up to 5 login profiles per crawl; form login or manual sign-in in a remote isolated browser; MFA pause/resume; encrypted session reuse and reauthentication; protected assets; API/GraphQL discovery (GET/read-only); separate archives or combined discovery with an access matrix — see [docs/AUTHENTICATED-CRAWLING.md](docs/AUTHENTICATED-CRAWLING.md) |
+| Login with Browser | Reusable saved logins: the real site in an isolated browser, you sign in by hand, “Use This Login” validates and encrypts the session, then any later crawl can attach it. Create / rename / re-sign-in / forget / delete; one profile per owner **and** site; status, last-used and expiry shown — see [docs/AUTHENTICATED-CRAWLING.md](docs/AUTHENTICATED-CRAWLING.md) |
+| Signed-in crawling | Up to 5 login profiles per crawl; form login or manual sign-in in a remote isolated browser; MFA pause/resume; encrypted session reuse and reauthentication; protected assets; API/GraphQL discovery (GET/read-only); separate archives or combined discovery with an access matrix |
 | Accounts | Sign-in required for everything; every job belongs to one user; CSRF protection, rate limits, per-user quotas |
 | Deployment | Single server, or web tier (e.g. Vercel) + persistent worker processes sharing a PostgreSQL queue; archives on local disk or any S3-compatible bucket — see [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) |
 | Recovery | Retries with exponential backoff + `Retry-After`, per-failure report, graceful cancel (partial ZIP), resume after a worker shutdown or crash |
@@ -66,7 +69,13 @@ also needs the `x-csrf-token` header (value from `/api/auth/me`) and must come f
 | `GET /api/auth/me` | `{user, csrfToken, registration, features}` (`user: null` when signed out) |
 | `GET\|POST /api/auth/setup` | one-time first administrator: status (`{setupAvailable, state, message}`) · `{setupKey, email, password, confirmPassword}` → `201` \| `403` \| `409` \| `503` |
 | `GET /api/admin/overview` | administrators only: accounts and counts (`403` for `role = user`) |
-| `POST /api/crawl` `{url, confirmPermission: true, options?, authProfiles?, authMode?}` | queue a crawl → `201 {id, ids, mode, workerOnline}` |
+| `POST /api/crawl` `{url, confirmPermission: true, options?, authProfiles?, authMode?, savedProfileIds?}` | queue a crawl → `201 {id, ids, mode, workerOnline, attachedProfiles}` |
+| `GET\|POST /api/login-profiles` | your saved logins + deployment features · create `{name, startUrl, loginUrl?, authenticatedSelector?, matchSubdomains?}` → `201` |
+| `GET\|PATCH\|DELETE /api/login-profiles/:id` | metadata (never session material) · rename `{name}` · delete profile + session |
+| `GET\|POST\|DELETE /api/login-profiles/:id/session` | session status (`hasSession`, cookie count, expiry — no values) · import a captured request → · forget the saved login |
+| `POST\|DELETE /api/login-profiles/:id/browser-login` | open the isolated sign-in window → `201 {session}` · close it |
+| `GET\|POST /api/login-profiles/sessions/:sid` | window state (status, page, message) · `{action: "input"…\|"confirm"\|"cancel"}` |
+| `GET /api/login-profiles/sessions/:sid/frame` | the current JPEG of the window (`204` when there is nothing to show) |
 | `GET /api/crawl` | your history |
 | `GET /api/crawl/:id` | job, login profiles (no secrets), open sign-in sessions, recent log |
 | `GET /api/crawl/:id/events` | SSE: `snapshot`, `log`, `stats`, `status`, `login`, `job`, `done`; resumable with `Last-Event-ID` |
@@ -115,6 +124,10 @@ See [docs/TESTING-REPORT.md](docs/TESTING-REPORT.md) for what is covered and the
 * **Worker exits at start** – it prints why: missing `DATABASE_URL`, Chromium not found/not starting
   (`npm run chromium:check`), or the archive store rejecting its credentials.
 * **"Authenticated crawling is disabled"** – set `CRAWLER_CREDENTIAL_ENCRYPTION_KEY` on the web app and the worker.
+* **"Login with Browser" says a worker is needed** – the sign-in window is a real browser on the worker; start
+  `npm run worker` (or use `CRAWLER_WORKER_MODE=inline`). Saved profiles are kept while no worker is online.
+* **Saved login shows "session expired" / "sign-in failed"** – the site no longer accepts the stored session. Press
+  **Sign in again**; the profile and its site scope stay as they were.
 * **Cannot sign in over plain http** – the session cookie is `Secure` in production; use HTTPS (or
   `AUTH_COOKIE_SECURE=0` for local testing only).
 * **Crawl shows "interrupted"** – its worker stopped. Press *Resume*; finished pages are not fetched again.

@@ -96,8 +96,9 @@ describe("web UI in a real browser", () => {
   });
 
   it("runs an authenticated crawl: profile form → verification step answered in the remote sign-in panel → live progress → ZIP download", async () => {
-    await page.getByText("Authentication / Login Settings").click();
-    await page.getByLabel("Enable Authentication").check();
+    // Step 2 offers a saved login ("Login with Browser") and a login entered here; this test uses the latter.
+    await page.getByRole("button", { name: "Login with Browser" }).click();
+    await page.getByRole("tab", { name: "Login entered here" }).click();
     await page.getByRole("button", { name: "+ Add Login" }).click();
     await field("Profile Name").fill("Member");
     await field("Login Page URL").fill(`${site.url}/login`);

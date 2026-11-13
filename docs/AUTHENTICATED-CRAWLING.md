@@ -7,7 +7,83 @@ SSO, consent screen) the crawl waits and the human does that step personally.
 Requires `CRAWLER_CREDENTIAL_ENCRYPTION_KEY` (32 random bytes; `openssl rand -base64 32`) on the web app **and** the
 worker. Without it the feature is off and the UI says so. Security properties are in [SECURITY.md](SECURITY.md).
 
-## Login profiles
+## Login with Browser (reusable saved logins)
+
+The workflow most people want, and the one the start form offers first:
+
+1. **Address.** Type the site you are allowed to archive.
+2. **Login with Browser.** The worker opens the *real* site in its own isolated Chromium context. Nothing is filled in
+   for you: you click, type, follow redirects, finish SSO, enter a one-time code or answer a CAPTCHA yourself, on as
+   many pages as the sign-in needs.
+3. **Use This Login.** The worker checks the session is really usable (see *What counts as signed in*), encrypts it and
+   stores it against the profile. The window closes and the dashboard confirms “Login profile saved”.
+4. **Start download.** The profile is attached to the crawl; the worker restores the session into a fresh context and
+   crawls the signed-in pages. Progress, discovered pages, assets and errors appear as for any crawl.
+
+Unlike the per-crawl profiles above, a saved login **outlives the crawl** and can be reused by later downloads.
+
+### What a saved profile is
+
+| Field | Meaning |
+|---|---|
+| Name | Free text, unique per owner. Rename at any time. |
+| Site (`targetHost` + `targetOrigin`) | **The** scope. A saved login only ever matches this host (and its port). |
+| Start URL | Where crawls begin; also where the browser opens when no sign-in page is known. |
+| Login URL | Optional; where “Login with Browser” opens. Must be on the same site. |
+| Authenticated-state selector | Optional. An element that is only visible when signed in; strongly recommended. |
+| Match subdomains | Off by default. When on, `app.example.com` may use a login saved for `example.com` — never the other way round. |
+| Status | `active`, `session-expired`, `session-rejected`, `needs-request-capture`, `login-failed`, each with a human label. |
+| Last used / use count | When a crawl last restored it, and how many times. |
+
+Ownership and site scope are enforced on the server for every operation: another user's profile answers an identical
+`404` (existence is not leaked), and attaching a profile to a different site answers `400 … cannot be used for <host>`
+without creating a job. The UI mirrors the same rule, so the checkbox for a foreign site is disabled and says why.
+
+### What counts as signed in
+
+“Use This Login” is never trusted on its own:
+
+* With an **authenticated-state selector**, that element must be visible in the window.
+* Without one, the page must have left the login URL, no password field may still be visible, and the browser must hold
+  at least one cookie or storage entry for the site.
+* Finally the captured state is scoped to the profile's host before it is encrypted: cookies for other domains are
+  dropped, parent-domain cookies are kept, sub-domain cookies only when the profile allows them.
+
+If any check fails the window stays open, says exactly what is missing, and you can try again. The profile itself is
+never deleted by a failed attempt.
+
+### Re-login, expiry and deletion
+
+* A session has a lifetime (`CRAWLER_SAVED_SESSION_TTL_HOURS`, default 720 hours = 30 days). After that the profile
+  shows **session expired** and offers a new sign-in.
+* When a crawl finds the site rejecting the session (401/403 or a bounce to the login form) the profile is marked
+  `session-rejected` and the UI offers “Sign in again”. Nothing silently falls back to anonymous crawling.
+* **Forget login** removes the stored session but keeps the profile and its history; **Delete** removes both.
+* **Sign in again** reopens the browser window on the same profile and replaces the stored session.
+
+### Options
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `CRAWLER_LOGIN_BROWSER_MINUTES` | 15 | How long one window may stay open (max 60). An untouched window is closed after 90 s. |
+| `CRAWLER_SAVED_SESSION_TTL_HOURS` | 720 | Lifetime of a saved session. |
+| `CRAWLER_MAX_SAVED_PROFILES` | 25 | Profiles per user (max 200). |
+
+All three are read by the web app and the worker; `CRAWLER_CREDENTIAL_ENCRYPTION_KEY` must be the same on both.
+
+### When no worker is online
+
+Profiles can be listed, renamed and deleted, but “Login with Browser” refuses with **“No crawl worker online”** and no
+window is created. The panel says so up front, and an existing saved login is kept untouched.
+
+### If a headless browser cannot hold the login
+
+Some sites bind a session to the device that created it (a TLS fingerprint, a hardware check). For those, the panel's
+**“Sign-in not saved?”** section accepts a signed-in request copied from your own browser (DevTools → Network →
+*Copy as cURL*). Only its cookies and storage are kept, they are scoped to the site like any other capture, and the
+`curl` command itself is never stored or executed.
+
+## Login profiles for a single crawl
 
 A crawl can carry up to five profiles (`CRAWLER_AUTH_MAX_PROFILES`). Each has a name, the login page URL and a sign-in
 method:
@@ -91,7 +167,10 @@ are still reused).
 ## Not supported
 
 * Sites that require a client certificate, a hardware-bound device check, or a browser extension.
-* Keeping a session alive beyond the crawl, scheduled re-crawls, or sharing a saved session between crawls.
+* Scheduled re-crawls: a saved login can be reused by any later crawl, but nothing crawls on a timer.
+* Sharing a saved login with another user — profiles are strictly per owner.
+* Rewriting a stored session after a site rotates its token behind your back; the profile simply reports
+  `session-rejected` and asks for a new sign-in.
 * Archiving responses of non-GET API calls, WebSocket traffic or server-sent streams.
 * Passkey/WebAuthn prompts cannot be answered through a picture of a remote browser; use another sign-in method.
 * The remote window forwards clicks, typing, scrolling and a few navigation keys — no drag-and-drop, file upload,
@@ -101,5 +180,8 @@ are still reused).
 
 Against a test-owned site (`tests/fixtures/auth-site.ts`) with a real cookie session, a one-time-code step, role-based
 pages, protected assets, JSON and GraphQL APIs, and destructive endpoints that count every hit — in a real Chromium, and
-end to end through the HTTP API, the worker process and the web UI. It has **not** been run against third-party login
+end to end through the HTTP API, the worker process and the web UI. The “Login with Browser” flow is covered by
+`tests/integration/saved-login-profiles.test.ts` (real PostgreSQL, real Chromium, real worker) and
+`tests/e2e/saved-login-ui.test.ts` (the production build driven in a browser, including a 390 px phone layout). It has
+**not** been run against third-party login
 providers (Google, Microsoft, Okta, Auth0 …) or real CAPTCHA services. Results: [TESTING-REPORT.md](TESTING-REPORT.md).

@@ -46,6 +46,17 @@ export interface CrawlerInternal {
 export interface AuthHooks {
   /** A previously saved (already decrypted) browser session for this profile, if one exists. */
   loadSession?: () => Promise<SessionState | null>;
+  /**
+   * A reusable "Login with Browser" session offered to the job (already decrypted and validated by
+   * the host). Tried before `loadSession`; the host falls back to the profile's own login when the
+   * site rejects it, so an expired saved login degrades instead of failing the crawl.
+   */
+  loadSavedProfile?: () => Promise<{ state: SessionState; profileName: string } | null>;
+  /**
+   * Called when the site rejected a session that came from a reusable profile, so the owner is told
+   * their saved login needs renewing. Never receives cookies or tokens.
+   */
+  onSavedProfileRejected?: (reason: "expired" | "invalid") => Promise<void>;
   /** Persist a freshly captured session. The callee must encrypt it. */
   saveSession?: (state: SessionState) => Promise<void>;
   /** The stored session was rejected by the site and must not be reused. */
@@ -147,6 +158,9 @@ export class Crawler extends EventEmitter implements CrawlRunner {
   status: CrawlStatus = "idle";
   /** Authentication state of this crawler's profile ("not-configured" for public crawls). */
   authStatus: AuthenticationStatus = "not-configured";
+  /** Set while the crawl runs on a reusable "Login with Browser" session. */
+  private savedProfileUsed = false;
+  private savedProfileFailed = false;
   /** The interactive sign-in currently waiting for the user, if any. */
   activeLogin: InteractiveLogin | null = null;
   readonly opts: CrawlOptions;
@@ -471,6 +485,23 @@ export class Crawler extends EventEmitter implements CrawlRunner {
     const profile = this.authProfile;
     const renderer = this.renderer;
     if (!profile || !renderer) throw new Error("Authenticated browser session is unavailable.");
+    // A reusable "Login with Browser" profile is tried first: it is what the user explicitly chose.
+    if (!this.savedProfileFailed) {
+      const reusable = await this.authHooks?.loadSavedProfile?.().catch(() => null);
+      if (reusable) {
+        try {
+          await renderer.restoreSession(reusable.state);
+          this.savedProfileUsed = true;
+          this.setAuthStatus("authenticated");
+          this.log("AUTH", `Restored the saved login profile “${reusable.profileName}”`);
+          return;
+        } catch {
+          this.savedProfileFailed = true;
+          await this.authHooks?.onSavedProfileRejected?.("invalid").catch(() => {});
+          this.log("WARN", "The saved login profile could not be restored; signing in with this crawl's own settings instead");
+        }
+      }
+    }
     const saved = await this.authHooks?.loadSession?.().catch(() => null);
     if (saved) {
       await renderer.restoreSession(saved);
@@ -997,6 +1028,13 @@ export class Crawler extends EventEmitter implements CrawlRunner {
             this.log("WARN", this.stopReason);
             // The rejected session must not be restored again.
             await this.authHooks?.clearSession?.("expired").catch(() => {});
+            if (this.savedProfileUsed) {
+              // A rejected reusable session is never offered again: reauthentication uses the
+              // profile's own credentials (or asks the user), and the owner is told to renew it.
+              this.savedProfileFailed = true;
+              this.savedProfileUsed = false;
+              await this.authHooks?.onSavedProfileRejected?.("expired").catch(() => {});
+            }
             this.authStatus = "session-expired";
             this.emit("auth", "session-expired");
             this.setStatus("paused");

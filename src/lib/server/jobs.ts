@@ -2,7 +2,8 @@ import crypto from "node:crypto";
 import { and, asc, desc, eq, gt, inArray, isNull, sql } from "drizzle-orm";
 import { db } from "@/db";
 import { authProfiles, crawlJobs, jobCommands, jobEvents, loginSessions, workers, type AuthProfileRow, type CrawlJobRow, type LoginSessionRow } from "@/db/schema";
-import { AuthConfigurationError, authenticatedCrawlingEnabled, decryptSecretBytes, encryptSecret, usernameHint, validateAuthProfiles } from "@/lib/crawler/auth";
+import { AuthConfigurationError, authenticatedCrawlingEnabled, decryptSecretBytes, encryptSecret, usernameHint, validateAuthProfiles, type AuthProfile } from "@/lib/crawler/auth";
+import { markSavedProfilesUsed, resolveSavedProfilesForCrawl } from "./login-profiles";
 import { parseLoginInput, LoginInputError } from "@/lib/crawler/interactive-login";
 import { assertPublicUrl, SsrfError } from "@/lib/crawler/security";
 import { sanitizeOptions } from "@/lib/crawler/types";
@@ -100,9 +101,11 @@ interface CreateBody {
   confirmPermission?: unknown;
   authProfiles?: unknown;
   authMode?: unknown;
+  /** Ids of reusable "Login with Browser" profiles (owner-scoped, must match the crawled site). */
+  savedProfileIds?: unknown;
 }
 
-export async function createCrawl(user: SessionUser, body: CreateBody): Promise<{ id: string; ids: string[]; mode: string; workerOnline: boolean }> {
+export async function createCrawl(user: SessionUser, body: CreateBody): Promise<{ id: string; ids: string[]; mode: string; workerOnline: boolean; attachedProfiles: string[] }> {
   if (body.confirmPermission !== true) throw new ApiError(400, "You must confirm that you own the website or have permission to archive it.");
   if (typeof body.url !== "string" || !body.url.trim() || body.url.length > 2048) throw new ApiError(400, "Please enter a website URL.");
   let url = body.url.trim();
@@ -130,10 +133,27 @@ export async function createCrawl(user: SessionUser, body: CreateBody): Promise<
       }
     }
   }
+  // Reusable "Login with Browser" profiles: owner-scoped, and only for the site they were saved for.
+  const saved = await resolveSavedProfilesForCrawl(user, url, body.savedProfileIds);
+  if (saved.attached.length && !authenticatedCrawlingEnabled()) {
+    throw new AuthConfigurationError("Saved logins are disabled: set CRAWLER_CREDENTIAL_ENCRYPTION_KEY on the web app and the worker.", 503);
+  }
+  for (const attached of saved.attached) {
+    try {
+      await assertPublicUrl(attached.loginUrl, allowPrivateNetworks());
+    } catch (e) {
+      if (e instanceof SsrfError) throw new ApiError(400, `The sign-in page of “${attached.name}” is not allowed: ${e.message}`);
+      throw e;
+    }
+  }
+
   const combined = body.authMode === "combined";
   if (combined && profiles.length < 2) throw new ApiError(400, "Combined discovery needs at least two login profiles.");
-  const mode = profiles.length === 0 ? "public" : combined ? "combined" : "authenticated";
-  const jobCount = mode === "authenticated" ? profiles.length : 1;
+  if (combined && saved.attached.length) throw new ApiError(400, "Combined discovery needs its own login profiles; saved logins are attached one crawl per profile.");
+  // A saved login is a login profile too: with no manual profiles the crawl becomes authenticated.
+  if (saved.attached.length && profiles.length > 0) throw new ApiError(400, "Attach either a saved login or a crawl-specific login for this site, not both.");
+  const mode = saved.attached.length ? "authenticated" : profiles.length === 0 ? "public" : combined ? "combined" : "authenticated";
+  const jobCount = mode === "authenticated" ? (saved.attached.length || profiles.length) : 1;
 
   await rateLimit(`crawl:${user.id}`, limits.startsPerMinute, 60, `Too many crawls started. Limit: ${limits.startsPerMinute} per minute.`);
   const active = await db
@@ -148,11 +168,27 @@ export async function createCrawl(user: SessionUser, body: CreateBody): Promise<
 
   const raw = body.options && typeof body.options === "object" ? (body.options as Record<string, unknown>) : {};
   // Signed-in crawls render every page in one browser context; keep the load on the site modest.
-  const opts = sanitizeOptions(profiles.length ? { ...raw, concurrency: Math.min(2, Number(raw.concurrency) || 2) } : raw);
+  const authenticated = profiles.length > 0 || saved.attached.length > 0;
+  const opts = sanitizeOptions(authenticated ? { ...raw, concurrency: Math.min(2, Number(raw.concurrency) || 2) } : raw);
+
+  // A saved login becomes an ordinary per-crawl login profile (method "manual"), so the existing
+  // queue, worker, session reuse, expiry and cancellation paths apply unchanged. Only the reference
+  // to the reusable profile is extra.
+  const savedProfiles: AuthProfile[] = saved.attached.map((a) => ({
+    id: crypto.randomBytes(8).toString("hex"),
+    name: a.name,
+    loginUrl: a.loginUrl,
+    username: "",
+    password: "",
+    method: "manual",
+    ...(a.authenticatedSelector ? { authenticatedSelector: a.authenticatedSelector } : {}),
+  }));
+  const allProfiles = [...profiles, ...savedProfiles];
+  const savedByProfileId = new Map(saved.attached.map((a, i) => [savedProfiles[i].id, a.id]));
 
   const ids: string[] = [];
   await db.transaction(async (tx) => {
-    const groups = mode === "authenticated" ? profiles.map((p) => [p]) : [profiles];
+    const groups = mode === "authenticated" ? allProfiles.map((p) => [p]) : [allProfiles];
     for (const group of groups) {
       const id = crypto.randomBytes(8).toString("hex");
       ids.push(id);
@@ -167,18 +203,20 @@ export async function createCrawl(user: SessionUser, body: CreateBody): Promise<
           name: p.name,
           method: p.method,
           loginOrigin: new URL(p.loginUrl).origin,
-          usernameHint: usernameHint(p.username),
+          usernameHint: savedByProfileId.has(p.id) ? (saved.attached.find((a) => a.id === savedByProfileId.get(p.id))?.usernameHint ?? "") : usernameHint(p.username),
           // The whole profile (including the password) is one AES-256-GCM envelope bound to this row.
           secret: encryptSecret(JSON.stringify(p), `profile:${p.id}`),
+          savedProfileId: savedByProfileId.get(p.id) ?? null,
         });
       }
     }
   });
-  for (const p of profiles) {
+  for (const p of allProfiles) {
     p.password = "";
     p.username = "";
   }
-  return { id: ids[0], ids, mode, workerOnline: await workerOnline() };
+  if (saved.attached.length) await markSavedProfilesUsed(saved.attached.map((a) => a.id));
+  return { id: ids[0], ids, mode, workerOnline: await workerOnline(), attachedProfiles: saved.attached.map((a) => a.name) };
 }
 
 export async function listJobs(user: SessionUser) {

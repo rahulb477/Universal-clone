@@ -1,5 +1,7 @@
 # Deployment
 
+For the worker heartbeat investigation, identity diagnostics, manual Hostless settings and production acceptance checklist, see [WORKER-INVESTIGATION.md](WORKER-INVESTIGATION.md).
+
 Universal Clone has three parts that must agree with each other:
 
 | Part | What it is | What it needs |

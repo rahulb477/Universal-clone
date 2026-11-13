@@ -1,5 +1,6 @@
 import { drizzle, type NodePgDatabase } from "drizzle-orm/node-postgres";
 import { Pool } from "pg";
+import { databaseErrorCode } from "./diagnostics";
 
 const globalForDb = globalThis as typeof globalThis & { __ucPool?: Pool; __ucDb?: NodePgDatabase };
 
@@ -15,7 +16,7 @@ export function getPool(): Pool {
     const ssl = process.env.DATABASE_SSL === "require" ? { rejectUnauthorized: true } : process.env.DATABASE_SSL === "no-verify" ? { rejectUnauthorized: false } : undefined;
     globalForDb.__ucPool = new Pool({ connectionString: url, max, ssl, idleTimeoutMillis: 30000, connectionTimeoutMillis: 10000 });
     // An idle client dropping its connection must not crash the process.
-    globalForDb.__ucPool.on("error", (e) => console.error("[db] idle client error:", e.message));
+    globalForDb.__ucPool.on("error", (e) => console.error(JSON.stringify({ event: "database_idle_client_error", code: databaseErrorCode(e) })));
   }
   return globalForDb.__ucPool;
 }

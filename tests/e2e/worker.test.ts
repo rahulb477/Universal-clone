@@ -101,6 +101,54 @@ describe("worker process", () => {
     await expect(bootWorker(workerEnv({ CHROMIUM_PATH: process.execPath }))).rejects.toThrow(/bad option/);
   });
 
+  it("recovers from stale and deleted registrations and reports health using database time", async () => {
+    const w = await startWorker({ WORKER_ID: "heartbeat-regression" });
+    try {
+      const initial = (await pg.query<{ heartbeat_at: Date }>("select heartbeat_at from workers where id = $1", ["heartbeat-regression"]))[0];
+      expect(initial).toBeDefined();
+      await waitFor("heartbeat advances", async () => {
+        const row = (await pg.query<{ heartbeat_at: Date }>("select heartbeat_at from workers where id = $1", ["heartbeat-regression"]))[0];
+        return row && row.heartbeat_at > initial.heartbeat_at;
+      }, 15000);
+      expect(await (await fetch(web.base + "/api/health")).json()).toEqual({ ok: true, worker: "online" });
+      // Freeze the process, age its row using PostgreSQL's clock and verify the actual web route.
+      w.proc.kill("SIGSTOP");
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      await pg.query("update workers set heartbeat_at = now() - interval '31 seconds' where id = $1", ["heartbeat-regression"]);
+      expect(await (await fetch(web.base + "/api/health")).json()).toEqual({ ok: true, worker: "offline" });
+      // Simulate stale-row cleanup by another worker after a prolonged outage.
+      await pg.query("delete from workers where id = $1", ["heartbeat-regression"]);
+      w.proc.kill("SIGCONT");
+      await waitFor("re-registration and online health", async () => {
+        const health = await (await fetch(web.base + "/api/health")).json();
+        return health.worker === "online" && (await pg.query("select id from workers where id = $1", ["heartbeat-regression"])).length > 0;
+      }, 15000);
+      fx.slowMs = 250;
+      const response = await user.post("/api/crawl", { url: fx.url + "/slow/1", confirmPermission: true, options: { ...slow, maxPages: 8 } });
+      expect(response.status).toBe(201);
+      const { id } = await response.json();
+      await waitFor("reconnected worker claims crawl", async () => {
+        const r = await row(id);
+        return r.status === "running" && r.worker_id === "heartbeat-regression";
+      });
+      await untilStatus(id, ["completed"]);
+      const finished = await row(id);
+      expect(finished.stats.pagesCrawled).toBeGreaterThan(0);
+      expect(finished.finished_at).toBeTruthy();
+      expect((await pg.query("select id from job_events where job_id = $1 and type = 'done'", [id])).length).toBe(1);
+      expect((await user.del(`/api/crawl/${id}`)).status).toBe(200);
+    } finally {
+      fx.slowMs = 0;
+      w.proc.kill("SIGCONT");
+      await w.stop("SIGTERM");
+    }
+    expect(await (await fetch(web.base + "/api/health")).json()).toEqual({ ok: true, worker: "offline" });
+  });
+
+  it("refuses a configured database identity mismatch without exposing the URL", async () => {
+    await expect(bootWorker(workerEnv({ DATABASE_EXPECTED_FINGERPRINT: "incorrect" }))).rejects.toThrow(/fingerprint differs from the web app/);
+  });
+
   it("picks up a queued job, uploads the archive to object storage, and the web tier hands out a short-lived download link to the owner only", async () => {
     const r = await user.post("/api/crawl", { url: fx.url + "/", confirmPermission: true, options: { maxPages: 12, delayMs: 0, retryBaseMs: 5 } });
     const { id } = await r.json();

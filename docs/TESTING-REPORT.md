@@ -35,9 +35,13 @@ are therefore unverified. `scripts/chromium-env.mjs` picks the browser (operator
 `npx vitest run` (all files, one after another):
 
 ```
-Test Files  13 passed | 1 skipped (14)       (the skipped file is the opt-in live test)
-     Tests  222 passed | 2 skipped (224)     duration 535 s
+Test Files  15 passed | 1 skipped (16)       (the skipped file is the opt-in live test)
+     Tests  250 passed | 2 skipped (252)     duration 731 s
 ```
+
+The 30 tests added for the one-time first-administrator setup (V3.1.1) are included above: 8 in
+`tests/unit/setup.test.ts`, 19 in `tests/e2e/setup-admin.test.ts`, 1 in `tests/db/migrations.test.ts` and the
+updated migration ledger expectations in `tests/e2e/api.test.ts`.
 
 This is one clean run made after the last code change. Two earlier full runs in the same pass each had one failing
 test, both timing-related and both since fixed in the product (the sign-in panel requested a frame just after the
@@ -51,7 +55,7 @@ machine would not be surprising; that has not been measured.
 | `tests/unit/url.test.ts` | 29 | normalisation, query rules, traps, local path mapping, collision registry, scope, patterns, option clamping |
 | `tests/unit/parser.test.ts` | 14 | srcset, CSS/JS reference extraction, HTML extraction + rewriting, charsets, robots.txt (current and pre-3.1 bot name), sitemaps |
 | `tests/unit/auth.test.ts` | 3 | credential envelopes (tamper rejection), safe profile projection, unsafe login URLs |
-| `tests/db/migrations.test.ts` | 13 | migrations on a real PostgreSQL (below) |
+| `tests/db/migrations.test.ts` | 14 | migrations on a real PostgreSQL (below), including the `admin_setup` marker |
 | `tests/integration/crawl.test.ts` | 32 | full public crawls of a local multi-feature site (scenario table below) |
 | `tests/integration/storage.test.ts` | 15 | local and S3 archive stores (below) |
 | `tests/integration/authenticated-crawl.test.ts` | 4 | form login, separate archives per profile, isolation, wrong password, redaction, mid-crawl reauthentication |
@@ -60,7 +64,32 @@ machine would not be surprising; that has not been measured.
 | `tests/e2e/api.test.ts` | 21 | the production server over HTTP + SSE: accounts, CSRF, ownership, crawls, signed-in crawls |
 | `tests/e2e/worker.test.ts` | 9 | web tier and worker as separate processes: queue, object storage, shutdown, crash, restart, retention |
 | `tests/e2e/ui.test.ts` | 7 | the web UI driven in a real browser, plus the embedding headers |
+| `tests/unit/setup.test.ts` | 8 | `ADMIN_SETUP_KEY` rules (missing, short, low-entropy, placeholder, timing-safe match), administrator password policy, setup status vocabulary |
+| `tests/e2e/setup-admin.test.ts` | 19 | one-time first-administrator setup against the production server: disabled without a usable key, wrong key, invalid email, weak password, mismatched confirmation, cross-origin/cross-site/form posts, rate limits, creation, scrypt storage, `409` afterwards, advisory-lock race, sign-in, admin-only route, ordinary accounts unaffected, key never logged, and the page in an Android viewport |
 | `tests/live/live.test.ts` | 2 skipped | opt-in (`LIVE=1`), needs internet; **not run in this pass** |
+
+### First-administrator setup (V3.1.1)
+
+`tests/e2e/setup-admin.test.ts` boots the production build against real PostgreSQL servers and drives the
+requirement checklist end to end:
+
+| # | Requirement | Result |
+|---|---|---|
+| 1 | Setup page loads on mobile (412×915, Android UA) | pass — no horizontal overflow, all fields ≥ 36 px tall, show/hide works, hints and inline errors render, no console errors |
+| 2 | Setup disabled without a valid secret | pass — missing key: `state: "not-configured"`, page shows "Setup is not available", `POST` → `503`; short key → `key-too-weak` + `503` |
+| 3 | Incorrect setup key rejected | pass — `403`, nothing written |
+| 4 | Invalid email rejected | pass — `400` for `not-an-email`, `a@b`, spaces, empty, non-string |
+| 5 | Weak password rejected | pass — `400` with the policy message for short, single-class and email-derived passwords |
+| 6 | Confirmation mismatch rejected | pass — `400` |
+| 7 | First admin created | pass — `201`, `role = admin`, marker row written |
+| 8 | Password hashed | pass — `scrypt$32768$8$1$…`, never the plaintext, in the database or the response |
+| 9 | Duplicate email rejected | pass — `409` when a `user` row already holds the address; setup still available afterwards |
+| 10 | Second admin rejected | pass — `409` after creation, and a `201`/`409` split under two simultaneous submissions (advisory lock) |
+| 11 | Login works after setup | pass — `POST /api/auth/login` → session cookie + CSRF, `/api/auth/me` reports the admin |
+| 12 | Admin-only routes work | pass — `/api/admin/overview` `200` for the admin, `403` for `role = user`, `401` anonymous |
+| 13 | Existing authentication unaffected | pass — an ordinary account signs in and uses `/api/crawl` exactly as before; the whole existing suite is unchanged and green |
+| 14 | Production build passes | pass — `next build`, `tsc --noEmit`, `eslint .` clean |
+| 15 | No secrets in bundles or logs | pass — `ADMIN_SETUP_KEY`, `scrypt`, `timingSafeEqual` and `pg_advisory` appear in **no** `.next/static` file; server output contains neither the key nor the password |
 
 ## What the new suites establish
 

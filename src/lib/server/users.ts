@@ -239,6 +239,19 @@ export async function requireUser(req: Request): Promise<AuthContext> {
   return ctx;
 }
 
+/** An administered route: a valid session whose account carries the 'admin' role. */
+export async function requireAdmin(req: Request): Promise<AuthContext> {
+  const ctx = await requireUser(req);
+  if (ctx.user.role !== "admin") throw new ApiError(403, "Administrator access is required.");
+  return ctx;
+}
+
+/** True when at least one enabled administrator account exists. Used by the one-time setup status. */
+export async function adminExists(): Promise<boolean> {
+  const rows = await db.select({ id: users.id }).from(users).where(eq(users.role, "admin")).limit(1);
+  return rows.length > 0;
+}
+
 export async function logout(ctx: AuthContext): Promise<void> {
   await db.delete(userSessions).where(eq(userSessions.id, ctx.sessionId));
 }

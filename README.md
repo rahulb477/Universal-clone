@@ -42,6 +42,10 @@ npm run user:create -- you@example.com             # accounts are operator-creat
 npm run build && npm start                         # http://localhost:3000
 ```
 
+No terminal (Vercel, phone browser)? Set `ADMIN_SETUP_KEY` (32+ random characters) in the project's
+environment variables and open `/setup-admin` once to create the first administrator — see
+[docs/ADMIN-SETUP.md](docs/ADMIN-SETUP.md).
+
 Requires Node 20.12+ and PostgreSQL. No PostgreSQL at hand? `npm run db:dev` starts a real local server from an npm
 package and prints its `DATABASE_URL` (development only).
 
@@ -53,13 +57,15 @@ Every environment variable is listed with its default in [`.env.example`](.env.e
 
 ## HTTP API
 
-All routes except `/api/health` and `/api/auth/{login,register,me}` require the session cookie; every non-GET request
+All routes except `/api/health` and `/api/auth/{login,register,me,setup}` require the session cookie; every non-GET request
 also needs the `x-csrf-token` header (value from `/api/auth/me`) and must come from the app's own origin.
 
 | Method & path | Purpose |
 |---|---|
 | `POST /api/auth/login` `{email, password}` · `POST /api/auth/logout` · `POST /api/auth/register` | session |
 | `GET /api/auth/me` | `{user, csrfToken, registration, features}` (`user: null` when signed out) |
+| `GET\|POST /api/auth/setup` | one-time first administrator: status (`{setupAvailable, state, message}`) · `{setupKey, email, password, confirmPassword}` → `201` \| `403` \| `409` \| `503` |
+| `GET /api/admin/overview` | administrators only: accounts and counts (`403` for `role = user`) |
 | `POST /api/crawl` `{url, confirmPermission: true, options?, authProfiles?, authMode?}` | queue a crawl → `201 {id, ids, mode, workerOnline}` |
 | `GET /api/crawl` | your history |
 | `GET /api/crawl/:id` | job, login profiles (no secrets), open sign-in sessions, recent log |

@@ -32,10 +32,18 @@ npm run db:migrate                            # creates/updates the schema; safe
 USER_PASSWORD='…' npm run user:create -- you@example.com admin   # or omit USER_PASSWORD and type it on stdin
 ```
 
+No terminal? Create the **first** administrator in the browser instead — set `ADMIN_SETUP_KEY` and open
+`/setup-admin` (see [ADMIN-SETUP.md](ADMIN-SETUP.md)).
+
 * `npm run db:migrate` applies the SQL files in `drizzle/` in order, each in its own transaction, and records them in
   `schema_migrations`. It takes a PostgreSQL advisory lock, so parallel deploys do not collide. A database created by
   version 3.0 (`drizzle-kit push`) is upgraded in place; its existing rows have no owner and are therefore invisible to
   every account (delete them or assign `owner_id` by hand).
+* **First administrator without a terminal.** Set `ADMIN_SETUP_KEY` (≥ 32 random characters) in the
+  environment and open `/setup-admin`. The page creates one administrator with `role = 'admin'`, using the
+  same `users` table, scrypt hashing and sign-in flow as every other account. Setup then disables itself
+  permanently; remove the variable afterwards. Details, recovery and troubleshooting:
+  [ADMIN-SETUP.md](ADMIN-SETUP.md).
 * Registration is **closed** by default: accounts exist only when an operator creates them. `AUTH_REGISTRATION=invite`
   plus `AUTH_INVITE_CODE` (≥ 16 characters) or `AUTH_REGISTRATION=open` enable self-service sign-up.
 * The repository does not commit a `package-lock.json` (it is git-ignored), so installs resolve versions within the
@@ -61,7 +69,9 @@ both consume the queue, which is fine only if they are configured identically.
 **Web (Vercel project settings → Environment Variables):** `DATABASE_URL` (a pooled connection string is fine),
 `DATABASE_SSL=require` if the provider needs it, `CRAWLER_CREDENTIAL_ENCRYPTION_KEY`, the `S3_*` variables,
 `AUTH_REGISTRATION` as desired, and `TRUSTED_PROXY_HOPS=1` (without it every visitor shares one per-IP rate-limit
-bucket). `CRAWLER_WORKER_MODE` defaults to `external` there. Function limits to keep in mind: the live-update stream
+bucket). Add `ADMIN_SETUP_KEY` (≥ 32 random characters) **temporarily** if you want to create the first
+administrator from the browser at `https://<your-deployment>/setup-admin`, then delete the variable and
+redeploy — see “First administrator in the browser” below. `CRAWLER_WORKER_MODE` defaults to `external` there. Function limits to keep in mind: the live-update stream
 closes after `SSE_MAX_SECONDS` (default 280) and the browser reconnects where it left off, so set the function's
 maximum duration to at least that or lower the variable to fit your plan.
 
@@ -124,6 +134,23 @@ the browser Playwright expects, so no `CHROMIUM_PATH` is needed), and `/data` mu
 production web build with no browser available, separate worker processes, a real PostgreSQL server and an S3 API
 endpoint (see [TESTING-REPORT.md](TESTING-REPORT.md)). No Vercel project, managed database or cloud bucket was used.
 
+### First administrator in the browser (Vercel, no terminal)
+
+1. **Settings → Environment Variables → Add**: key `ADMIN_SETUP_KEY`, value = a random 32+ character
+   secret (Production ticked). **Save**, then **Deployments → ⋯ → Redeploy** — new variables only reach a
+   new deployment.
+2. On your phone open `https://universal-clone7.vercel.app/setup-admin`, fill in email, a strong password
+   (12+ characters, three character classes, not containing the email local part) twice, and the setup key.
+   **Create administrator**.
+3. **Continue to sign in** and sign in at `/` with the new account. The account has `role = 'admin'`; it can
+   open `/api/admin/overview`, which ordinary accounts cannot.
+4. **Remove `ADMIN_SETUP_KEY`** and redeploy. `/setup-admin` then reports that setup is disabled, and
+   `POST /api/auth/setup` answers `503`. Setup also stays disabled on its own: the completion marker row
+   (`admin_setup`) makes it answer `409` from then on, even if the account is later deleted.
+
+No terminal, no `npm run` and no database client is needed. Steps, screenshots-in-words, recovery and
+troubleshooting table: [ADMIN-SETUP.md](ADMIN-SETUP.md).
+
 ## Archive storage
 
 | `ARCHIVE_STORAGE` | Behaviour |
@@ -156,7 +183,7 @@ only for throw-away preview environments.
 
 ## Upgrading from 3.0
 
-1. Deploy the new code, run `npm run db:migrate`.
+1. Deploy the new code, run `npm run db:migrate` (adds `0002_admin_setup.sql`, a one-row marker table).
 2. Create accounts (`npm run user:create`) — 3.0 had none; `CRAWLER_AUTH_API_TOKEN` is no longer used.
 3. Set `CRAWLER_CREDENTIAL_ENCRYPTION_KEY` if it was not set.
 4. Old job directories under `CRAWL_DATA_DIR` are not migrated; delete them.

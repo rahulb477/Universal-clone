@@ -45,6 +45,13 @@ answers (see [AUTHENTICATED-CRAWLING.md](AUTHENTICATED-CRAWLING.md)).
 * **CSRF**: every non-GET request must carry `x-csrf-token` (an HMAC of the session token, handed out by
   `/api/auth/me`) **and** come from the same origin (`Sec-Fetch-Site` / `Origin`, or the `APP_ORIGIN` allow-list).
 * **Registration** is closed by default (`npm run user:create`). `invite` mode compares the code in constant time.
+* **First administrator (`/setup-admin`)**: gated by the server-only `ADMIN_SETUP_KEY` (≥ 32 characters, plus an
+  entropy/placeholder check; timing-safe SHA-256 + `timingSafeEqual` comparison). Same-origin and
+  `application/json` are required, attempts are rate-limited in PostgreSQL (5 / 15 min per client, 100 / 15 min
+  overall), and the "no administrator yet" check plus the insert happen in one transaction behind
+  `pg_advisory_xact_lock`, so the endpoint cannot be raced into a second administrator. It answers `409` once a
+  marker row exists and `503` without a key. The key is never sent to a client, logged, or stored. See
+  [ADMIN-SETUP.md](ADMIN-SETUP.md).
 * **Rate limits** are stored in PostgreSQL, so they hold across instances: sign-in 10 / 15 min per address and
   100 / 15 min per client IP, registration 10 / h per IP, crawl starts `CRAWLER_STARTS_PER_MINUTE` per user, login tests
   10 / 10 min, sign-in input events 1200 / min. The client IP comes from `X-Forwarded-For` only as far as
@@ -134,7 +141,9 @@ Partitioned`; leave it unset in production.
 * No email verification, password reset, second factor or account lockout notification for app accounts. An operator
   resets a password by deleting the user row and creating the account again; that cascades to the user's job rows, so
   delete the user's downloads in the UI first or their archive files stay in the store until removed by hand.
-* An admin role is stored but grants nothing yet; there is no admin UI.
+* An `admin` role exists and gates `GET /api/admin/overview` (account list and counts). There is no admin UI
+  beyond that read-only endpoint, and no password reset flow — losing the administrator password requires the
+  operator procedure in [ADMIN-SETUP.md](ADMIN-SETUP.md) §6.
 * Chromium runs with `--no-sandbox` unless `CRAWLER_CHROMIUM_SANDBOX=1`. Run workers in an isolated container/VM with
   restricted egress (in particular: no route to cloud metadata or internal services) for defence in depth.
 * In Chromium, DNS is resolved by the browser, so DNS rebinding is mitigated by the per-host pre-check only.

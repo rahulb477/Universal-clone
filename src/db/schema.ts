@@ -116,6 +116,13 @@ export const rateEvents = pgTable("rate_events", {
   at: ts("at").notNull().defaultNow(),
 });
 
+/** Marker row (id = 'first-admin'): first-administrator setup has been completed and stays disabled. */
+export const adminSetup = pgTable("admin_setup", {
+  id: text("id").primaryKey(),
+  userId: text("user_id"),
+  completedAt: ts("completed_at").notNull().defaultNow(),
+});
+
 export type CrawlJobRow = typeof crawlJobs.$inferSelect;
 export type AuthProfileRow = typeof authProfiles.$inferSelect;
 export type LoginSessionRow = typeof loginSessions.$inferSelect;

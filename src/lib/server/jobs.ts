@@ -91,7 +91,7 @@ export async function ownedJob(user: SessionUser, id: string): Promise<CrawlJobR
 }
 
 export async function workerOnline(): Promise<boolean> {
-  const rows = await db.select({ id: workers.id }).from(workers).where(gt(workers.heartbeatAt, new Date(Date.now() - 30000))).limit(1);
+  const rows = await db.select({ id: workers.id }).from(workers).where(sql`${workers.heartbeatAt} > now() - interval '30 seconds'`).limit(1);
   return rows.length > 0;
 }
 

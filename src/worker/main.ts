@@ -2,6 +2,7 @@ import http from "node:http";
 import path from "node:path";
 import { sql } from "drizzle-orm";
 import { closeDb, db } from "@/db";
+import { databaseErrorCode, databaseFingerprint } from "@/db/diagnostics";
 import { migrate } from "@/db/migrate";
 import { authenticatedCrawlingEnabled } from "@/lib/crawler/auth";
 import { Renderer } from "@/lib/crawler/renderer";
@@ -15,6 +16,12 @@ import { CrawlWorker } from "./worker";
  */
 async function main() {
   if (!process.env.DATABASE_URL) throw new Error("DATABASE_URL is required");
+  const fingerprint = databaseFingerprint(process.env.DATABASE_URL);
+  console.log(JSON.stringify({ event: "database_identity", component: "worker", fingerprint }));
+  const expected = process.env.DATABASE_EXPECTED_FINGERPRINT;
+  if (expected && (!fingerprint || expected !== fingerprint)) {
+    throw new Error("Database endpoint fingerprint differs from the web app. Compare DATABASE_URL host and database name (including Neon branch/pooler endpoint); do not log the URL.");
+  }
   // Resolve the packaged browser (or the explicit operator override), never a fallback chain.
   const helper = path.join(process.cwd(), "scripts", "chromium-env.mjs");
   const { applyChromiumEnv } = (await import(/* webpackIgnore: true */ helper)) as { applyChromiumEnv: () => Promise<{ ok: boolean; reason?: string; version?: string; source?: string }> };
@@ -42,10 +49,21 @@ async function main() {
     console.log(`[worker] ${chromium.version} via ${chromium.source}`);
   }
   if (process.env.WORKER_MIGRATE === "1") {
-    const r = await migrate(process.env.DATABASE_URL);
-    console.log(`[worker] migrations applied: ${r.applied.join(", ") || "none"}`);
+    try {
+      const r = await migrate(process.env.DATABASE_URL);
+      console.log(`[worker] migrations applied: ${r.applied.join(", ") || "none"}`);
+    } catch (error) {
+      console.error(JSON.stringify({ event: "migration_failed", code: databaseErrorCode(error), hint: "Check migration state, permissions and database connectivity." }));
+      throw new Error("Worker migration failed; see redacted diagnostic above.");
+    }
   }
-  await db.execute(sql`select 1`);
+  try {
+    await db.execute(sql`select 1`);
+    console.log(JSON.stringify({ event: "database_connected", component: "worker" }));
+  } catch (error) {
+    console.error(JSON.stringify({ event: "database_connection_failed", code: databaseErrorCode(error), hint: "Check DATABASE_URL, TLS, network access and pool capacity." }));
+    throw new Error("Worker database connection failed; see redacted diagnostic above.");
+  }
   const worker = new CrawlWorker({
     id: process.env.WORKER_ID || undefined,
     info: { chromium: chromium.ok ? chromium.version : null, storage: storageKind(), authenticatedCrawling: authenticatedCrawlingEnabled(), node: process.version },

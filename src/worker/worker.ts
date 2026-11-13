@@ -3,7 +3,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { and, asc, eq, inArray, isNull, lt, notInArray, or, sql } from "drizzle-orm";
-import { db } from "@/db";
+import { db, getPool } from "@/db";
+import { databaseErrorCode } from "@/db/diagnostics";
 import { authProfiles, crawlJobs, jobCommands, jobEvents, loginSessions, workers, type CrawlJobRow } from "@/db/schema";
 import { decryptSecret, encryptSecret, type AuthProfile } from "@/lib/crawler/auth";
 import { openSavedSessionForWorker, invalidateSavedSession, touchSavedSession } from "@/lib/server/login-profiles";
@@ -63,6 +64,7 @@ export class CrawlWorker {
   private stopping = false;
   private ticking = false;
   private flushing = false;
+  private heartbeatInFlight: Promise<void> | null = null;
   private maxJobs: number;
   private pollMs: number;
   private log: (msg: string) => void;
@@ -85,18 +87,28 @@ export class CrawlWorker {
   async start() {
     await fs.promises.mkdir(DATA_DIR, { recursive: true, mode: 0o700 });
     await getStore().check();
-    await db
-      .insert(workers)
-      .values({ id: this.id, info: this.o.info ?? {} })
-      .onConflictDoUpdate({ target: workers.id, set: { startedAt: new Date(), heartbeatAt: new Date(), info: this.o.info ?? {} } });
-    await this.recover();
+    try {
+      await this.recover();
+      await db.insert(workers)
+        .values({ id: this.id, startedAt: sql`now()`, heartbeatAt: sql`now()`, info: this.o.info ?? {} })
+        .onConflictDoUpdate({ target: workers.id, set: { startedAt: sql`now()`, heartbeatAt: sql`now()`, info: this.o.info ?? {} } });
+      this.log(JSON.stringify({ event: "worker_registered", heartbeatIntervalMs: HEARTBEAT_MS }));
+    } catch (error) {
+      this.log(JSON.stringify({ event: "worker_registration_failed", code: databaseErrorCode(error), hint: "Check database connectivity, permissions and migrations." }));
+      throw new Error("Worker registration failed; see redacted diagnostic above.");
+    }
     this.timers.push(setInterval(() => void this.tick(), this.pollMs));
     // A touch slower than the job loop: fetching the sign-in window's queue on its own connection
     // must never delay claiming a queued crawl.
     this.timers.push(setInterval(() => void this.loginBrowser.tick(), 750));
     this.timers.push(setInterval(() => void this.flush(), 400));
-    this.timers.push(setInterval(() => void this.heartbeat(), HEARTBEAT_MS));
-    this.timers.push(setInterval(() => void this.janitor().catch((e) => this.log(`janitor: ${(e as Error).message}`)), 60000));
+    this.timers.push(setInterval(() => {
+      if (this.heartbeatInFlight || this.stopping) return;
+      const pending = this.heartbeat();
+      this.heartbeatInFlight = pending;
+      void pending.finally(() => { this.heartbeatInFlight = null; });
+    }, HEARTBEAT_MS));
+    this.timers.push(setInterval(() => void this.janitor().catch((e) => this.log(JSON.stringify({ event: "janitor_failed", code: databaseErrorCode(e) }))), 60000));
     void this.janitor().catch(() => {});
     this.log(`started (max ${this.maxJobs} concurrent jobs, storage: ${getStore().kind})`);
   }
@@ -106,6 +118,7 @@ export class CrawlWorker {
     if (this.stopping) return;
     this.stopping = true;
     this.timers.forEach(clearInterval);
+    await this.heartbeatInFlight;
     for (const job of this.live.values()) job.runner.suspend();
     await Promise.race([Promise.allSettled(this.settled), new Promise((r) => setTimeout(r, 20000))]);
     await this.flush();
@@ -141,17 +154,23 @@ export class CrawlWorker {
         .set({ status: "cancelled", message: "The worker restarted.", frame: null, finishedAt: new Date() })
         .where(and(inArray(loginSessions.jobId, rows.map((r) => r.id)), eq(loginSessions.status, "awaiting-user")));
     }
-    await db.delete(workers).where(lt(workers.heartbeatAt, new Date(Date.now() - 10 * 60 * 1000)));
+    await db.delete(workers).where(sql`${workers.heartbeatAt} < now() - interval '10 minutes'`);
   }
 
   private async heartbeat() {
     try {
-      await db.update(workers).set({ heartbeatAt: new Date(), info: { ...(this.o.info ?? {}), activeJobs: this.live.size } }).where(eq(workers.id, this.id));
+      // A stale row may have been cleaned up by another worker during an outage. Re-register
+      // atomically instead of silently updating zero rows forever.
+      const info = { ...(this.o.info ?? {}), activeJobs: this.live.size };
+      await db.insert(workers).values({ id: this.id, heartbeatAt: sql`now()`, info })
+        .onConflictDoUpdate({ target: workers.id, set: { heartbeatAt: sql`now()`, info } });
       const ids = [...this.live.keys()];
-      if (ids.length) await db.update(crawlJobs).set({ heartbeatAt: new Date() }).where(and(inArray(crawlJobs.id, ids), eq(crawlJobs.workerId, this.id)));
+      if (ids.length) await db.update(crawlJobs).set({ heartbeatAt: sql`now()` }).where(and(inArray(crawlJobs.id, ids), eq(crawlJobs.workerId, this.id)));
       await this.recover();
+      this.log(JSON.stringify({ event: "heartbeat_ok", activeJobs: this.live.size }));
     } catch (e) {
-      this.log(`heartbeat failed: ${(e as Error).message}`);
+      const pool = getPool();
+      this.log(JSON.stringify({ event: "heartbeat_failed", code: databaseErrorCode(e), pool: { total: pool.totalCount, idle: pool.idleCount, waiting: pool.waitingCount }, hint: "Check database connectivity, permissions, migrations and pool capacity." }));
     }
   }
 
@@ -189,7 +208,7 @@ export class CrawlWorker {
         await this.launch(row);
       }
     } catch (e) {
-      this.log(`tick failed: ${(e as Error).message}`);
+      this.log(JSON.stringify({ event: "queue_tick_failed", code: databaseErrorCode(e) }));
     } finally {
       this.ticking = false;
     }
@@ -348,7 +367,7 @@ export class CrawlWorker {
     try {
       for (const job of this.live.values()) await this.flushJob(job);
     } catch (e) {
-      this.log(`flush failed: ${(e as Error).message}`);
+      this.log(JSON.stringify({ event: "job_flush_failed", code: databaseErrorCode(e) }));
     } finally {
       this.flushing = false;
     }
@@ -365,7 +384,7 @@ export class CrawlWorker {
       const status = job.runner.status;
       // Final states are written by finish() together with the archive metadata.
       if (status === "running" || status === "paused") {
-        await db.update(crawlJobs).set({ stats: s, status, stopReason: s.stopReason ?? null, heartbeatAt: new Date() }).where(and(eq(crawlJobs.id, job.id), eq(crawlJobs.workerId, this.id)));
+        await db.update(crawlJobs).set({ stats: s, status, stopReason: s.stopReason ?? null, heartbeatAt: sql`now()` }).where(and(eq(crawlJobs.id, job.id), eq(crawlJobs.workerId, this.id)));
       }
       for (const p of s.profiles ?? []) {
         if (job.credentialsCleared || job.profileStatus.get(p.profileId) === p.status) continue;
